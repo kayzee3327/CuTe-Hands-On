@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "CUDA",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/extern/cutlass/include/**",
+                "${workspaceFolder}/extern/cutlass/tools/util/include/**"
+            ],
+            "defines": [
+                "__CUDACC__",
+                "__NVCC__"
+            ],
+            "compilerPath": "/opt/nvidia/hpc_sdk/Linux_x86_64/2025/compilers/bin/nvcc",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

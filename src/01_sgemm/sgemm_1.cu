@@ -1,4 +1,8 @@
+#include "cutlass/util/reference/host/tensor_fill.h"
 #include <cute/tensor.hpp>
+
+#include "ref.h"
+
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class AThreadLayout,
@@ -17,7 +21,7 @@ void sgemm1_tn(ProblemShape shape_MNK, CtaTiler cta_tiler,
     // use `CUTE_STATIC_ASSERT_V` for CuTe related compile-time comparing
     // rank-3
     CUTE_STATIC_ASSERT_V(rank(shape_MNK) == _3{});
-    // shape MN/KM/KN
+    // shape MN/KM/KN congruent with strides
     CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNK), dA));
     CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNK), dB));
     CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));
@@ -174,7 +178,8 @@ void sgemm1_tn(ProblemShape shape_MNK, CtaTiler cta_tiler,
 }
 
 template <class TA, class TB, class TC, class Alpha, class Beta>
-void call_sgemm1_tn(TA *A, TB *B, TC *C, int M, int N, int K, Alpha alpha, Beta beta) {
+void call_sgemm1_tn(TA *A, TB *B, TC *C, int M, int N, int K, Alpha alpha, Beta beta) 
+{
     using namespace cute;
     // step1.1 Define shapes (dynamic)
     auto prob_shape = make_shape(M, N, K);
@@ -222,4 +227,45 @@ void call_sgemm1_tn(TA *A, TB *B, TC *C, int M, int N, int K, Alpha alpha, Beta 
          C, dC, sC, tC, 
          alpha, beta);
     
+}
+
+
+int main() {
+    using TA = float;
+    using TB = float;
+    using TC = float;
+    using TI = float;
+
+    int M = 5120, N = 5120, K = 4096;
+    TI alpha = 1.0, beta = 0.0;
+
+    // tn
+    cutlass::HostTensor<TA, cutlass::layout::RowMajor> A({K, M});
+    cutlass::HostTensor<TB, cutlass::layout::RowMajor> B({K, N});
+    cutlass::HostTensor<TC, cutlass::layout::RowMajor> C({M, N});
+    cutlass::HostTensor<TC, cutlass::layout::RowMajor> Reference_C({M, N});
+
+    cutlass::reference::host::TensorFill(A.host_view(), TA(1.0));
+    cutlass::reference::host::TensorFill(B.host_view(), TB(1.0));
+    cutlass::reference::host::TensorFill(C.host_view(), TC(0.0));
+    cutlass::reference::host::TensorFill(Reference_C.host_view(), TC(0));
+    
+    // Push the initialized host data to the GPU
+    A.sync_device();
+    B.sync_device();
+    C.sync_device();
+    Reference_C.sync_device();
+
+    call_sgemm1_tn(A.device_data(), B.device_data(), C.device_data(), M, N, K, alpha, beta);
+    ref_gemm(A, B, Reference_C, alpha, beta, M, N, K);
+
+    // Wait for the GPU reference kernel to finish
+    cudaDeviceSynchronize();
+
+    C.sync_host();
+    Reference_C.sync_host();
+
+    tensor_cmp(C, Reference_C);
+    
+    return 0;
 }

@@ -36,7 +36,8 @@ endfunction()
 # --- 4. Define Your Targets ---
 
 # Example 1: Basic SGEMM
-add_cute_example(sgemm1 src/01_sgemm.cu)
+add_cute_example(sgemm1 src/01_sgemm/sgemm_1.cu)
+add_cute_example(sgemm2 src/01_sgemm/sgemm_2.cu)
 
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed

@@ -183,7 +183,7 @@ void call_sgemm2_nt(TA *A, TB *B, TC *C,
                                       Layout<Shape<_32,_8>>{},
                                       Layout<Shape<_4, _1>>{});                                  
 
-    // step4.1 Define C thread layouts (static) using TiledCopy
+    // step4.1 Define C thread layouts (static) using TiledMMA
     TiledMMA mmaC = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
                                    Layout<Shape<_16, _16, _1>>{});
     

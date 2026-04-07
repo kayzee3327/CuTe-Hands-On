@@ -1,9 +1,12 @@
-cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.25.2 FATAL_ERROR) # cuda c++ 20
 project(CuTe-Hands-On LANGUAGES CXX CUDA)
 
 # --- 1. Settings ---
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# old versions of cmake does not know how to compile cuda >=c++20
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_ARCHITECTURES 80 90a) # Build for Ampere (80) and Hopper (90a)
 
 # --- 2. Dependencies ---
@@ -26,6 +29,7 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
         ${CMAKE_CURRENT_SOURCE_DIR}/include # Your local headers
         ${CUTLASS_INCLUDE_DIRS}             # CUTLASS & CuTe headers
     )
+    target_compile_features(${TARGET_NAME} PRIVATE cxx_std_20 cuda_std_20)
 
     # Standard flags needed for CUTLASS/CuTe
     target_compile_options(${TARGET_NAME} PRIVATE 
@@ -38,6 +42,7 @@ endfunction()
 # Example 1: Basic SGEMM
 add_cute_example(sgemm1 src/01_sgemm/sgemm_1.cu)
 add_cute_example(sgemm2 src/01_sgemm/sgemm_2.cu)
+add_cute_example(sgemm_sm80 src/01_sgemm/sgemm_sm80.cu)
 
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed

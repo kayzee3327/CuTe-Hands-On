@@ -1,5 +1,6 @@
-#include "cutlass/util/reference/host/tensor_fill.h"
 #include <cute/tensor.hpp>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
 
 #include "ref.h"
 
@@ -307,41 +308,43 @@ int main()
     using TC = float;
     using TI = float;
 
-    int M = 5120, N = 5120, K = 2048;
+    int M = 5120, N = 5120, K = 4096;
     TI alpha = 1.0, beta = 0.0;
 
-    // tn
-    cutlass::HostTensor<TA, cutlass::layout::RowMajor> A({K, M});
-    cutlass::HostTensor<TB, cutlass::layout::RowMajor> B({K, N});
-    cutlass::HostTensor<TC, cutlass::layout::RowMajor> C({M, N});
-    cutlass::HostTensor<TC, cutlass::layout::RowMajor> Reference_C({M, N});
+    // TN: A is M×K, B is N×K (row-major)
+    thrust::host_vector<TA> h_A(M * K, TA(1.0));
+    thrust::host_vector<TB> h_B(N * K, TB(1.0));
+    thrust::host_vector<TC> h_C(M * N, TC(0.0));
+    thrust::host_vector<TC> h_RefC(M * N, TC(0.0));
 
-    cutlass::reference::host::TensorFill(A.host_view(), TA(1.0));
-    cutlass::reference::host::TensorFill(B.host_view(), TB(1.0));
-    cutlass::reference::host::TensorFill(C.host_view(), TC(0.0));
-    cutlass::reference::host::TensorFill(Reference_C.host_view(), TC(0));
+    thrust::device_vector<TA> d_A = h_A;
+    thrust::device_vector<TB> d_B = h_B;
+    thrust::device_vector<TC> d_C = h_C;
+    thrust::device_vector<TC> d_RefC = h_RefC;
 
-    // Push the initialized host data to the GPU
-    A.sync_device();
-    B.sync_device();
-    C.sync_device();
-    Reference_C.sync_device();
+    call_sgemm_sm80_tn(
+        thrust::raw_pointer_cast(d_A.data()),
+        thrust::raw_pointer_cast(d_B.data()),
+        thrust::raw_pointer_cast(d_C.data()),
+        M, N, K, alpha, beta);
 
-    call_sgemm_sm80_tn(A.device_data(), B.device_data(), C.device_data(), M, N, K, alpha, beta);
-    // const int iters = 1;
-    // const double flop = 2.0 * M * N * K;
-    // profile(1, flop, 
-    //         [](auto& a, auto& b, auto& c, auto alpha, auto beta, auto m, auto n, auto k){
-    //             return ref_gemm(a, b, c, alpha, beta, m, n, k);
-    //         },
-    //         A, B, Reference_C, alpha, beta, M, N, K);
-    ref_gemm(A, B, Reference_C, alpha, beta, M, N, K);
-    // Wait for the GPU reference kernel to finish
+    // TN: A is M×K, B is N×K → C = A * B^T (default transA=N, transB=T)
+    ref_gemm(
+        thrust::raw_pointer_cast(d_A.data()),
+        thrust::raw_pointer_cast(d_B.data()),
+        thrust::raw_pointer_cast(d_RefC.data()),
+        alpha, beta, M, N, K);
+
     cudaDeviceSynchronize();
     CUTE_CHECK_LAST();
-    C.sync_host();
-    Reference_C.sync_host();
 
-    tensor_cmp(C, Reference_C);
+    h_C = d_C;
+    h_RefC = d_RefC;
+
+    tensor_cmp(
+        thrust::raw_pointer_cast(h_C.data()),
+        thrust::raw_pointer_cast(h_RefC.data()),
+        M, N);
+
     return 0;
 }

@@ -10,14 +10,16 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_ARCHITECTURES 80 90a) # Build for Ampere (80) and Hopper (90a)
 
 # --- 2. Dependencies ---
-# We point directly to the submodule. 
+# We point directly to the submodule.
 # "include" has the core CuTe/CUTLASS headers.
 # "tools/util/include" has helper classes like HostTensor and reference GEMMs.
 set(CUTLASS_PATH ${CMAKE_CURRENT_SOURCE_DIR}/extern/cutlass)
-set(CUTLASS_INCLUDE_DIRS 
-    ${CUTLASS_PATH}/include 
+set(CUTLASS_INCLUDE_DIRS
+    ${CUTLASS_PATH}/include
     ${CUTLASS_PATH}/tools/util/include
 )
+
+find_package(CUDAToolkit REQUIRED)
 
 # --- 3. Helper Function to Add Examples ---
 # This macro saves you from writing 5 lines of cmake for every new file you create
@@ -32,8 +34,18 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
     # target_compile_features(${TARGET_NAME} PRIVATE cxx_std_20 cuda_std_20)
 
     # Standard flags needed for CUTLASS/CuTe
-    target_compile_options(${TARGET_NAME} PRIVATE 
+    target_compile_options(${TARGET_NAME} PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
+    )
+
+    target_link_libraries(${TARGET_NAME} PRIVATE CUDA::cublas)
+    # Derive the real library directory from the cublas import target and embed it
+    # as an rpath so the binary runs without LD_LIBRARY_PATH.
+    get_target_property(_cublas_loc CUDA::cublas IMPORTED_LOCATION)
+    get_filename_component(_cublas_dir "${_cublas_loc}" DIRECTORY)
+    set_target_properties(${TARGET_NAME} PROPERTIES
+        BUILD_RPATH  "${_cublas_dir}"
+        INSTALL_RPATH "${_cublas_dir}"
     )
 endfunction()
 

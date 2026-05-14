@@ -22,8 +22,8 @@ template <class ProblemShape, class CtaTiler,
           class Alpha, class Beta>
 __global__
 void sgemm_sm80_tn(ProblemShape shape_MNK, CtaTiler cta_tiler,
-                   TA const* A, AStride dA, ASmemLayout sA_Layout, TiledCopyA copy_a, S2RAtomA s2r_atom_a,
-                   TB const* B, BStride dB, BSmemLayout sB_Layout, TiledCopyB copy_b, S2RAtomB s2r_atom_b,
+                   TA const* A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a, S2RAtomA s2r_atom_a,
+                   TB const* B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b, S2RAtomB s2r_atom_b,
                    TC* C,       CStride dC, CSmemLayout          , TiledMMA mma,
                    Alpha alpha, Beta beta)
 {
@@ -66,8 +66,8 @@ void sgemm_sm80_tn(ProblemShape shape_MNK, CtaTiler cta_tiler,
     extern __shared__ char raw_smem[];
     using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
     SharedStorage& smem = *reinterpret_cast<SharedStorage*>(raw_smem);
-    Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()), sA_Layout);
-    Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), sB_Layout);
+    Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()), sA_layout);
+    Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), sB_layout);
 
     // step3.2 partitioning AB (g/s) via a TiledCopy
     ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
@@ -128,11 +128,13 @@ void sgemm_sm80_tn(ProblemShape shape_MNK, CtaTiler cta_tiler,
 #if 0
     if (thread0())
     {
-        print(tCrA.layout()); print("\n");
-        print(tCgC.layout()); print("\n");
-        print(tCrC.layout()); print("\n");
-        print(tCgC.layout()); print("\n");
-        print(take<0,3>(tCgC).layout()); print("\n");
+        print("gC:   "); print(  gC); print("\n");
+        print("tCgC: "); print(tCgC); print("\n");
+        print("sA(_, _, 0):"); print(sA(_, _, 0)); print("\n");
+        print("sB(_, _, 0):"); print(sB(_, _, 0)); print("\n");
+        print("tCrA: "); print(tCrA); print("\n");
+        print("tCrB: "); print(tCrB); print("\n");
+        print("tCrC: "); print(tCrC); print("\n");
     }
 #endif
     

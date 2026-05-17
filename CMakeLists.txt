@@ -21,6 +21,15 @@ set(CUTLASS_INCLUDE_DIRS
 
 find_package(CUDAToolkit REQUIRED)
 
+# We make it STATIC so the heavy compilation happens once and is archived.
+add_library(utils STATIC 
+    src/utils.cu
+)
+# PUBLIC means any target that links against 'utils' will automatically 
+# be able to #include "utils.h"
+target_include_directories(utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(utils PUBLIC CUDA::cublas)
+
 # --- 3. Helper Function to Add Examples ---
 # This macro saves you from writing 5 lines of cmake for every new file you create
 function(add_cute_example TARGET_NAME SOURCE_FILE)
@@ -37,10 +46,11 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
     target_compile_options(${TARGET_NAME} PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
     )
+    target_link_libraries(${TARGET_NAME} PRIVATE utils)
 
-    target_link_libraries(${TARGET_NAME} PRIVATE CUDA::cublas)
+    # target_link_libraries(${TARGET_NAME} PRIVATE CUDA::cublas)
     # Derive the real library directory from the cublas import target and embed it
-    # as an rpath so the binary runs without LD_LIBRARY_PATH.
+    # as an rpath in the ELF header so the binary runs without LD_LIBRARY_PATH.
     get_target_property(_cublas_loc CUDA::cublas IMPORTED_LOCATION)
     get_filename_component(_cublas_dir "${_cublas_loc}" DIRECTORY)
     set_target_properties(${TARGET_NAME} PROPERTIES
@@ -52,9 +62,9 @@ endfunction()
 # --- 4. Define Your Targets ---
 
 # Example 1: Basic SGEMM
-add_cute_example(sgemm_1 src/sgemm_1.cu)
-add_cute_example(sgemm_2 src/sgemm_2.cu)
-add_cute_example(sgemm_sm80 src/sgemm_sm80.cu)
+add_cute_example(sgemm_1 src/examples/sgemm_1.cu)
+add_cute_example(sgemm_2 src/examples/sgemm_2.cu)
+add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
 
 
 # Example 2: Hopper Specific (Ping Pong)

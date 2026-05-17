@@ -2,7 +2,8 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
-#include "ref.h"
+// #include "ref.h"
+#include "utils.h"
 
 
 template <class ProblemShape, class CtaTiler,
@@ -209,6 +210,7 @@ int main() {
 
     int M = 5120, N = 5120, K = 4096;
     TI alpha = 1.0, beta = 0.0;
+    int warmup_iters = 1, bench_iters = 5;
 
     // NT: A is K×M, B is K×N (column-major M×K and N×K stored row-major)
     thrust::host_vector<TA> h_A(K * M, TA(1.0));
@@ -221,29 +223,74 @@ int main() {
     thrust::device_vector<TC> d_C = h_C;
     thrust::device_vector<TC> d_RefC = h_RefC;
 
-    call_sgemm2_nt(
-        thrust::raw_pointer_cast(d_A.data()),
-        thrust::raw_pointer_cast(d_B.data()),
-        thrust::raw_pointer_cast(d_C.data()),
-        M, N, K, alpha, beta);
-
     // NT: A is K×M, B is K×N → C = A^T * B
-    ref_gemm(
-        thrust::raw_pointer_cast(d_A.data()),
-        thrust::raw_pointer_cast(d_B.data()),
-        thrust::raw_pointer_cast(d_RefC.data()),
-        alpha, beta, M, N, K,
-        CUBLAS_OP_T, CUBLAS_OP_N);
+    // ref_gemm(
+    //     thrust::raw_pointer_cast(d_A.data()),
+    //     thrust::raw_pointer_cast(d_B.data()),
+    //     thrust::raw_pointer_cast(d_RefC.data()),
+    //     alpha, beta, M, N, K,
+    //     CUBLAS_OP_T, CUBLAS_OP_N);
+    utils::cublas_sgemm_reference(
+        M, N, K,
+        d_A.data().get(),
+        d_B.data().get(),
+        d_RefC.data().get(),
+        1.0, 0.0,
+        false, true,
+        1, 5
+    );
+
+    for (int i = 0; i < warmup_iters; i++)
+    {
+        call_sgemm2_nt(
+            thrust::raw_pointer_cast(d_A.data()),
+            thrust::raw_pointer_cast(d_B.data()),
+            thrust::raw_pointer_cast(d_C.data()),
+            M, N, K, alpha, beta);
+    }
+    cudaDeviceSynchronize();
+    
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+    for (int i = 0; i < bench_iters; i++)
+    {
+        call_sgemm2_nt(
+            thrust::raw_pointer_cast(d_A.data()),
+            thrust::raw_pointer_cast(d_B.data()),
+            thrust::raw_pointer_cast(d_C.data()),
+            M, N, K, alpha, beta);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, start, stop);
+    float avg_ms = ms / bench_iters;
+
+    double ops_per_gemm = 2.0 * static_cast<double>(M) * N * K;
+    double tflops = (ops_per_gemm / (avg_ms / 1000.0)) / 1e12;
+
+    std::cout << "[sgemm2 SGEMM] "
+              << "M=" << M << ", N=" << N << ", K=" << K 
+              << " | Time: " << std::fixed << std::setprecision(3) << avg_ms << " ms"
+              << " | Performance: " << std::fixed << std::setprecision(2) << tflops << " TFLOPS\n";
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     cudaDeviceSynchronize();
 
     h_C = d_C;
     h_RefC = d_RefC;
 
-    tensor_cmp(
-        thrust::raw_pointer_cast(h_C.data()),
-        thrust::raw_pointer_cast(h_RefC.data()),
-        M, N);
+    // tensor_cmp(
+    //     thrust::raw_pointer_cast(h_C.data()),
+    //     thrust::raw_pointer_cast(h_RefC.data()),
+    //     M, N);
+    utils::compare_tensors(d_C.data().get(), d_RefC.data().get(), M*N);
 
     return 0;
 }

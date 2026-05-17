@@ -202,7 +202,7 @@ void call_sgemm2_nt(TA *A, TB *B, TC *C,
 }
 
 
-int main() {
+int main(int argc, char* argv[]) {
     using TA = float;
     using TB = float;
     using TC = float;
@@ -211,6 +211,23 @@ int main() {
     int M = 5120, N = 5120, K = 4096;
     TI alpha = 1.0, beta = 0.0;
     int warmup_iters = 1, bench_iters = 5;
+    // Check if an argument was provided
+    if (argc > 1) {
+        // Convert to string_view for safe, easy, and efficient comparison
+        std::string_view arg = argv[1];
+
+        if (arg == "-p") {
+            std::cout << "[INFO] Profile mode detected (-p). Adjusting iterations.\n";
+            warmup_iters = 1;
+            bench_iters = 0;
+        } else {
+            std::cerr << "Unknown argument: " << arg << "\n";
+            std::cerr << "Usage: " << argv[0] << " [-p]\n";
+            return 1; // Return an error code
+        }
+    } else {
+        std::cout << "[INFO] Running with default configuration.\n";
+    }
 
     // NT: A is K×M, B is K×N (column-major M×K and N×K stored row-major)
     thrust::host_vector<TA> h_A(K * M, TA(1.0));

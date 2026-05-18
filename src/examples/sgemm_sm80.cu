@@ -356,7 +356,7 @@ int main(int argc, char* argv[])
         d_RefC.data().get(),
         1.0, 0.0,
         false, true,
-        1, 5
+        warmup_iters, bench_iters
     );
 
     for (int i = 0; i < warmup_iters; i++)

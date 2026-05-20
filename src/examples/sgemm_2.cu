@@ -205,6 +205,7 @@ int main(int argc, char *argv[])
   int M = 5120, N = 5120, K = 4096;
   TI alpha = 1.0, beta = 0.0;
   int warmup_iters = 1, bench_iters = 5;
+  bool profile = false;
   // Check if an argument was provided
   if (argc > 1)
   {
@@ -216,6 +217,7 @@ int main(int argc, char *argv[])
       std::cout << "[INFO] Profile mode detected (-p). Adjusting iterations.\n";
       warmup_iters = 1;
       bench_iters = 0;
+      profile = true;
     }
     else
     {
@@ -264,6 +266,28 @@ int main(int argc, char *argv[])
         thrust::raw_pointer_cast(d_C.data()),
         M, N, K, alpha, beta);
   }
+  if (profile)
+  {
+    M = 8192; N = 8192; K = 8192;
+    call_sgemm2_nt(
+        thrust::raw_pointer_cast(d_A.data()),
+        thrust::raw_pointer_cast(d_B.data()),
+        thrust::raw_pointer_cast(d_C.data()),
+        M, N, K, alpha, beta);
+    M = 8192; N = 8192; K = 4096;
+    call_sgemm2_nt(
+        thrust::raw_pointer_cast(d_A.data()),
+        thrust::raw_pointer_cast(d_B.data()),
+        thrust::raw_pointer_cast(d_C.data()),
+        M, N, K, alpha, beta);
+    M = 2048; N = 2048; K = 1024;
+    call_sgemm2_nt(
+        thrust::raw_pointer_cast(d_A.data()),
+        thrust::raw_pointer_cast(d_B.data()),
+        thrust::raw_pointer_cast(d_C.data()),
+        M, N, K, alpha, beta);
+  }
+  
   cudaDeviceSynchronize();
 
   cudaEvent_t start, stop;

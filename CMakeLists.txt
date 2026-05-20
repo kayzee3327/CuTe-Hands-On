@@ -107,6 +107,7 @@ endfunction()
 add_cute_example(sgemm_1 src/examples/sgemm_1.cu)
 add_cute_example(sgemm_2 src/examples/sgemm_2.cu)
 add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
+add_cute_example(sgemm_opt80 src/sgemm_opt80.cu)
 
 
 # Example 2: Hopper Specific (Ping Pong)

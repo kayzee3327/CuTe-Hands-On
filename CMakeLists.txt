@@ -1,6 +1,22 @@
 cmake_minimum_required(VERSION 3.25.2 FATAL_ERROR) # cuda c++ 20
 project(CuTe-Hands-On LANGUAGES CXX CUDA)
 
+set(CLEAN_SCRIPT ${CMAKE_BINARY_DIR}/clean_non_ptx.cmake)
+file(WRITE ${CLEAN_SCRIPT}
+"file(GLOB files \"\${CLEAN_DIR}/*\")
+foreach(f \${files})
+  # If the file does NOT end in .ptx, delete it
+  if(NOT f MATCHES \"\\\\.ptx$\")
+      file(REMOVE \"\${f}\")
+  endif()
+endforeach()
+")
+
+# Use -DKEEP_PTX=ON to trigger this
+option(KEEP_PTX "Keep intermediate PTX files" OFF)
+# Use -DKEEP_PTX_TARGET="sgemm_sm80" to limit PTX generation to one target
+set(KEEP_PTX_TARGET "" CACHE STRING "Specific target to keep PTX for (leave empty for all)")
+
 # --- 1. Settings ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,15 +31,15 @@ set(CMAKE_CUDA_ARCHITECTURES 80 90a) # Build for Ampere (80) and Hopper (90a)
 # "tools/util/include" has helper classes like HostTensor and reference GEMMs.
 set(CUTLASS_PATH ${CMAKE_CURRENT_SOURCE_DIR}/extern/cutlass)
 set(CUTLASS_INCLUDE_DIRS
-    ${CUTLASS_PATH}/include
-    ${CUTLASS_PATH}/tools/util/include
+  ${CUTLASS_PATH}/include
+  ${CUTLASS_PATH}/tools/util/include
 )
 
 find_package(CUDAToolkit REQUIRED)
 
 # We make it STATIC so the heavy compilation happens once and is archived.
 add_library(utils STATIC 
-    src/utils.cu
+  src/utils.cu
 )
 # PUBLIC means any target that links against 'utils' will automatically 
 # be able to #include "utils.h"
@@ -42,10 +58,36 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
   )
   # target_compile_features(${TARGET_NAME} PRIVATE cxx_std_20 cuda_std_20)
 
+    
   # Standard flags needed for CUTLASS/CuTe
   target_compile_options(${TARGET_NAME} PRIVATE
-      $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
+  $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
   )
+  # Check if KEEP_PTX is ON, and if the target matches (or if no specific target was provided)
+  # --- UPDATED: Target-Specific PTX Output & Cleanup ---
+  if(KEEP_PTX AND (KEEP_PTX_TARGET STREQUAL "" OR KEEP_PTX_TARGET STREQUAL TARGET_NAME))
+      
+    # 1. Isolate the temp files in a TARGET-SPECIFIC directory to prevent race conditions
+    set(TARGET_PTX_DIR ${CMAKE_BINARY_DIR}/ptx_output/${TARGET_NAME})
+    file(MAKE_DIRECTORY ${TARGET_PTX_DIR})
+    
+    target_compile_options(${TARGET_NAME} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:
+        --keep 
+        --keep-dir=${TARGET_PTX_DIR}
+        --source-in-ptx
+      >
+    )
+      
+    # 2. Add a POST_BUILD step to run our cleanup script
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -DCLEAN_DIR=${TARGET_PTX_DIR} -P ${CLEAN_SCRIPT}
+      COMMENT "Cleaning up non-PTX intermediate files for ${TARGET_NAME}..."
+    )
+      
+    message(STATUS "Enabled PTX generation for ${TARGET_NAME} (Saved to ptx_output/${TARGET_NAME}/)")
+  endif()
+
   target_link_libraries(${TARGET_NAME} PRIVATE utils)
 
   # target_link_libraries(${TARGET_NAME} PRIVATE CUDA::cublas)
@@ -54,8 +96,8 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
   get_target_property(_cublas_loc CUDA::cublas IMPORTED_LOCATION)
   get_filename_component(_cublas_dir "${_cublas_loc}" DIRECTORY)
   set_target_properties(${TARGET_NAME} PROPERTIES
-      BUILD_RPATH  "${_cublas_dir}"
-      INSTALL_RPATH "${_cublas_dir}"
+    BUILD_RPATH  "${_cublas_dir}"
+    INSTALL_RPATH "${_cublas_dir}"
   )
 endfunction()
 

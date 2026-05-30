@@ -268,18 +268,6 @@ int main(int argc, char *argv[])
   }
   if (profile)
   {
-    M = 8192; N = 8192; K = 8192;
-    call_sgemm2_nt(
-        thrust::raw_pointer_cast(d_A.data()),
-        thrust::raw_pointer_cast(d_B.data()),
-        thrust::raw_pointer_cast(d_C.data()),
-        M, N, K, alpha, beta);
-    M = 8192; N = 8192; K = 4096;
-    call_sgemm2_nt(
-        thrust::raw_pointer_cast(d_A.data()),
-        thrust::raw_pointer_cast(d_B.data()),
-        thrust::raw_pointer_cast(d_C.data()),
-        M, N, K, alpha, beta);
     M = 2048; N = 2048; K = 1024;
     call_sgemm2_nt(
         thrust::raw_pointer_cast(d_A.data()),

@@ -5,6 +5,8 @@
 // #include "ref.h"
 #include "utils.h"
 
+#define OPT_CALLER call_sgemm_opt80_nt_v2
+
 // In this v1 impl, we expand the implicit optimization of
 //  `gemm(mma, tCsA, tCsB, tCrC);`
 template <class ProblemShape, class CtaTiler,
@@ -241,6 +243,192 @@ void call_sgemm_opt80_nt_v1(TA *A, TB *B, TC *C,
                                            alpha, beta);
 }
 
+template <class ProblemShape, class CtaTiler,
+          class TA, class AStride, class ASmemLayout, class TiledCopyA,
+          class TB, class BStride, class BSmemLayout, class TiledCopyB,
+          class TC, class CStride, class CSmemLayout, class TiledMma,
+          class Alpha, class Beta>
+__global__ void sgemm_opt80_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
+                                  TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
+                                  TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
+                                  TC *C, CStride dC, CSmemLayout, TiledMma mma,
+                                  Alpha alpha, Beta beta)
+{
+  using namespace cute;
+  
+  CUTE_STATIC_ASSERT_V(rank(shape_MNK) == _3{});
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 2>(shape_MNK), dA));
+  CUTE_STATIC_ASSERT_V(congruent(select<1, 2>(shape_MNK), dB));
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 1>(shape_MNK), dC));
+
+  Tensor mA = make_tensor(make_gmem_ptr(A), select<0, 2>(shape_MNK), dA);
+  Tensor mB = make_tensor(make_gmem_ptr(B), select<1, 2>(shape_MNK), dB);
+  Tensor mC = make_tensor(make_gmem_ptr(C), select<0, 1>(shape_MNK), dC);
+
+  auto coord = make_coord(blockIdx.x, blockIdx.y, _);
+  Tensor gA = local_tile(mA, select<0, 2>(cta_tiler), select<0, 2>(coord));
+  Tensor gB = local_tile(mB, select<1, 2>(cta_tiler), select<1, 2>(coord));
+  Tensor gC = local_tile(mC, select<0, 1>(cta_tiler), select<0, 1>(coord));
+
+  static_assert(is_static_v<ASmemLayout>);
+  static_assert(is_static_v<BSmemLayout>);
+  static_assert(is_static_v<CSmemLayout>);
+  CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(CSmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<1>(cta_tiler));
+
+  __shared__ TA smemA[cosize_v<ASmemLayout>];
+  __shared__ TB smemB[cosize_v<BSmemLayout>];
+  Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout);
+  Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout);
+
+  ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+  Tensor tAgA = thr_copy_a.partition_S(gA);
+  Tensor tAsA = thr_copy_a.partition_D(sA);
+  ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
+  Tensor tBgB = thr_copy_b.partition_S(gB);
+  Tensor tBsB = thr_copy_b.partition_D(sB);
+  Tensor tArA = make_fragment_like(tAsA);
+  Tensor tBrB = make_fragment_like(tBsB);
+
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tArA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tArA));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBrB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBrB));
+
+  copy(copy_a, tAgA(_, _, _, 0), tArA);
+  copy(copy_b, tBgB(_, _, _, 0), tBrB);
+
+  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+  Tensor tCsA = thr_mma.partition_A(sA);
+  Tensor tCsB = thr_mma.partition_B(sB);
+  Tensor tCgC = thr_mma.partition_C(gC);
+  Tensor tCrC = make_fragment_like(tCgC);
+
+  CUTE_STATIC_ASSERT_V(shape(tCgC) == shape(tCrC));
+  CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tCgC) == size<1>(tCsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tCgC) == size<1>(tCsB));
+
+  auto K_TILE_MAX = size<3>(tAgA); // same as size<3>(gA), but we work on tAgA
+
+  auto K_BLOCK_MAX = size<2>(tCsA);
+  Tensor tCrA = thr_mma.make_fragment_A(tCsA);
+  Tensor tCrB = thr_mma.make_fragment_B(tCsB);
+  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+
+  // SMEM->RMEM TiledCopy: 128-bit (LDS.128) loads, retiled to match MMA's A/B partitioning.
+  // Requires the MMA's PermutationMNK to make each thread's per-M / per-N elements contiguous
+  // (see call_sgemm_opt80_nt_v2). retile_D rebinds the same registers under the s2r thread/value layout.
+  auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
+  auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
+  Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+  Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+
+  auto s2r_tiled_copy_b = make_tiled_copy_B(Copy_Atom<UniversalCopy<uint128_t>, TB>{}, mma);
+  auto s2r_thr_copy_b   = s2r_tiled_copy_b.get_slice(threadIdx.x);
+  Tensor tXsB = s2r_thr_copy_b.partition_S(sB);
+  Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);
+
+  CUTE_UNROLL
+  for (uint k_tile = 0; k_tile < K_TILE_MAX; k_tile++)
+  {
+    __syncthreads();
+    copy(tArA, tAsA);
+    copy(tBrB, tBsB);
+    __syncthreads();
+
+    int k_tile_next = k_tile == K_TILE_MAX - 1 ? k_tile : k_tile + 1;
+    copy(copy_a, tAgA(_, _, _, k_tile_next), tArA);
+    copy(copy_b, tBgB(_, _, _, k_tile_next), tBrB);
+
+    CUTE_UNROLL
+    for (int k_block = 0; k_block < K_BLOCK_MAX; k_block++)
+    {
+      copy(s2r_tiled_copy_a, tXsA(_, _, k_block), tXrA(_, _, k_block));
+      copy(s2r_tiled_copy_b, tXsB(_, _, k_block), tXrB(_, _, k_block));
+
+      auto M = size<1>(tCrA);
+      auto N = size<1>(tCrB);
+
+      for (int m = 0; m < M; m += 2)
+      {
+        for (int n = 0; n < N; ++n)
+        {
+          int ns = (m & 2) ? N-1-n : n;
+          gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+          if (m+1 < M) 
+          {
+            gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+          }
+        }
+      }
+    }
+  }
+
+  axpby(alpha, tCrC, beta, tCgC);
+}
+
+template <class TA, class TB, class TC,
+          class Alpha, class Beta>
+void call_sgemm_opt80_nt_v2(TA *A, TB *B, TC *C,
+                            int M, int N, int K,
+                            Alpha alpha, Beta beta)
+{
+  using namespace cute;
+
+  auto prob_shape = make_shape(M, N, K);
+
+  auto dA = make_stride(_1{}, M);
+  auto dB = make_stride(_1{}, N);
+  auto dC = make_stride(N, _1{});
+
+  auto bM = _128{};
+  auto bN = _128{};
+  auto bK = _8{};
+  auto cta_tiler = make_shape(bM, bN, bK);
+
+  auto sA = make_layout(make_shape(bM, bK));
+  auto sB = make_layout(make_shape(bN, bK));
+  auto sC = make_layout(make_shape(bM, bN));
+
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+
+  // PermutationMNK reshuffles M and N so each thread's 8 per-M (per-N) values
+  // are contiguous in SMEM, enabling LDS.128 in the s2r TiledCopy.
+  // M dim (size 128): new coord (i=thread_m in [0,16), j=m_rep in [0,8))
+  //   -> old M = i*8 + j   (each thread owns 8 contiguous M floats)
+  // K is untouched.
+  TiledMMA mmaC = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
+                                 Layout<Shape<_16, _16, _1>>{},
+                                 Tile<Layout<Shape<_16, _8>, Stride<_8, _1>>,
+                                      Layout<Shape<_16, _8>, Stride<_8, _1>>,
+                                      _1>{});
+
+  dim3 dimBlock(32 * 8);
+  dim3 dimGrid(ceil_div(M, bM),
+               ceil_div(N, bN));
+  sgemm_opt80_nt_v2<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
+                                           A, dA, sA, copyA,
+                                           B, dB, sB, copyB,
+                                           C, dC, sC, mmaC,
+                                           alpha, beta);
+}
+
+
 int main(int argc, char *argv[])
 {
   using TA = float;
@@ -304,7 +492,7 @@ int main(int argc, char *argv[])
 
   for (int i = 0; i < warmup_iters; i++)
   {
-    call_sgemm_opt80_nt_v1(
+    OPT_CALLER(
         thrust::raw_pointer_cast(d_A.data()),
         thrust::raw_pointer_cast(d_B.data()),
         thrust::raw_pointer_cast(d_C.data()),
@@ -319,7 +507,7 @@ int main(int argc, char *argv[])
   cudaEventRecord(start);
   for (int i = 0; i < bench_iters; i++)
   {
-    call_sgemm_opt80_nt_v1(
+    OPT_CALLER(
         thrust::raw_pointer_cast(d_A.data()),
         thrust::raw_pointer_cast(d_B.data()),
         thrust::raw_pointer_cast(d_C.data()),

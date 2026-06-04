@@ -101,6 +101,17 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
   )
 endfunction()
 
+function(add_cute_demo TARGET_NAME SOURCE_FILE)
+  add_executable(${TARGET_NAME} ${SOURCE_FILE})
+  target_include_directories(${TARGET_NAME} PRIVATE 
+      ${CMAKE_CURRENT_SOURCE_DIR}/include # Your local headers
+      ${CUTLASS_INCLUDE_DIRS}             # CUTLASS & CuTe headers
+  )
+  target_compile_options(${TARGET_NAME} PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
+  )
+endfunction()
+
 # --- 4. Define Your Targets ---
 
 # Example 1: Basic SGEMM
@@ -109,7 +120,7 @@ add_cute_example(sgemm_2 src/examples/sgemm_2.cu)
 add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
 add_cute_example(sgemm_opt80 src/sgemm_opt80.cu)
 
-
+add_cute_demo(PermutationMNK demos/PermutationMNK.cu)
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed
 # add_cute_example(hopper_pingpong src/03_hopper/pingpong_gemm.cu)

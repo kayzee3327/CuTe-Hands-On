@@ -55,15 +55,19 @@ int main(int argc, char* argv[])
                                       _16, 
                                       _1>{});
 
-  // final
+  // merge thread tile (change _2 to actual thread tile size)
   TiledMMA mma5 = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
                                  Layout<Shape<_16, _16, _1>>{},
                                  Tile<Layout<Shape<_16, _2>, Stride<_2, _1>>,
                                       Layout<Shape<_16, _2>, Stride<_2, _1>>,
                                       _1>{});
-  // auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, float>{}, mma2);
-  // auto s2r_tiled_copy_b = make_tiled_copy_B(Copy_Atom<UniversalCopy<uint128_t>, float>{}, mma2);
-  // print_latex(s2r_tiled_copy_a);
+  
+  // make it LDS.128 friendly for 8*8 thread tile
+  TiledMMA mma6 = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
+                                 Layout<Shape<_16, _16, _1>>{},
+                                 Tile<Layout<Shape<_16, Shape<_4, _2>>, Stride<_4, Stride<_1, _64>>>,
+                                      Layout<Shape<_16, Shape<_4, _2>>, Stride<_4, Stride<_1, _64>>>,
+                                      _1>{});
 
   if (choice == 1)
   {
@@ -85,6 +89,11 @@ int main(int argc, char* argv[])
   {
     print_latex(mma5);
   }
+  else if (choice == 6)
+  {
+    print_latex(mma6);
+  }
+  
   
   
   return 0;

@@ -5,7 +5,7 @@
 // #include "ref.h"
 #include "utils.h"
 
-#define OPT_CALLER call_sgemm_opt80_nt_v2
+#define OPT_CALLER call_sgemm_opt86_nt_v2
 
 // In this v1 impl, we expand the implicit optimization of
 //  `gemm(mma, tCsA, tCsB, tCrC);`
@@ -14,7 +14,7 @@ template <class ProblemShape, class CtaTiler,
           class TB, class BStride, class BSmemLayout, class TiledCopyB,
           class TC, class CStride, class CSmemLayout, class TiledMma,
           class Alpha, class Beta>
-__global__ void sgemm_opt80_nt_v1(ProblemShape shape_MNK, CtaTiler cta_tiler,
+__global__ void sgemm_opt86_nt_v1(ProblemShape shape_MNK, CtaTiler cta_tiler,
                                   TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
                                   TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
                                   TC *C, CStride dC, CSmemLayout, TiledMma mma,
@@ -195,7 +195,7 @@ __global__ void sgemm_opt80_nt_v1(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
-void call_sgemm_opt80_nt_v1(TA *A, TB *B, TC *C,
+void call_sgemm_opt86_nt_v1(TA *A, TB *B, TC *C,
                             int M, int N, int K,
                             Alpha alpha, Beta beta)
 {
@@ -236,7 +236,7 @@ void call_sgemm_opt80_nt_v1(TA *A, TB *B, TC *C,
   dim3 dimBlock(32 * 8);
   dim3 dimGrid(ceil_div(M, bM),
                ceil_div(N, bN));
-  sgemm_opt80_nt_v1<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
+  sgemm_opt86_nt_v1<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
                                            A, dA, sA, copyA,
                                            B, dB, sB, copyB,
                                            C, dC, sC, mmaC,
@@ -248,7 +248,7 @@ template <class ProblemShape, class CtaTiler,
           class TB, class BStride, class BSmemLayout, class TiledCopyB,
           class TC, class CStride, class CSmemLayout, class TiledMma,
           class Alpha, class Beta>
-__global__ void sgemm_opt80_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
+__global__ void sgemm_opt86_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
                                   TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
                                   TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
                                   TC *C, CStride dC, CSmemLayout, TiledMma mma,
@@ -327,7 +327,7 @@ __global__ void sgemm_opt80_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
   // SMEM->RMEM TiledCopy: 128-bit (LDS.128) loads, retiled to match MMA's A/B partitioning.
   // Requires the MMA's PermutationMNK to make each thread's per-M / per-N elements contiguous
-  // (see call_sgemm_opt80_nt_v2). retile_D rebinds the same registers under the s2r thread/value layout.
+  // (see call_sgemm_opt86_nt_v2). retile_D rebinds the same registers under the s2r thread/value layout.
   auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
   auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
   Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
@@ -379,7 +379,7 @@ __global__ void sgemm_opt80_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
-void call_sgemm_opt80_nt_v2(TA *A, TB *B, TC *C,
+void call_sgemm_opt86_nt_v2(TA *A, TB *B, TC *C,
                             int M, int N, int K,
                             Alpha alpha, Beta beta)
 {
@@ -421,7 +421,7 @@ void call_sgemm_opt80_nt_v2(TA *A, TB *B, TC *C,
   dim3 dimBlock(32 * 8);
   dim3 dimGrid(ceil_div(M, bM),
                ceil_div(N, bN));
-  sgemm_opt80_nt_v2<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
+  sgemm_opt86_nt_v2<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
                                            A, dA, sA, copyA,
                                            B, dB, sB, copyB,
                                            C, dC, sC, mmaC,

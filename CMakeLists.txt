@@ -76,7 +76,6 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
       $<$<COMPILE_LANGUAGE:CUDA>:
         --keep 
         --keep-dir=${TARGET_PTX_DIR}
-        --source-in-ptx
       >
     )
       

@@ -63,6 +63,7 @@ function(add_cute_example TARGET_NAME SOURCE_FILE)
   target_compile_options(${TARGET_NAME} PRIVATE
   $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
   )
+  target_compile_options(${TARGET_NAME} PRIVATE -lineinfo)
   # Check if KEEP_PTX is ON, and if the target matches (or if no specific target was provided)
   # --- UPDATED: Target-Specific PTX Output & Cleanup ---
   if(KEEP_PTX AND (KEEP_PTX_TARGET STREQUAL "" OR KEEP_PTX_TARGET STREQUAL TARGET_NAME))

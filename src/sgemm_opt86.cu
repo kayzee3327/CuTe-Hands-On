@@ -1162,7 +1162,7 @@ int main(int argc, char *argv[])
   double ops_per_gemm = 2.0 * static_cast<double>(M) * N * K;
   double tflops = (ops_per_gemm / (avg_ms / 1000.0)) / 1e12;
 
-  std::cout << "[opt_80 SGEMM] "
+  std::cout << "[opt_86 SGEMM] "
             << "M=" << M << ", N=" << N << ", K=" << K
             << " | Time: " << std::fixed << std::setprecision(3) << avg_ms << " ms"
             << " | Performance: " << std::fixed << std::setprecision(2) << tflops << " TFLOPS\n";

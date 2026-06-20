@@ -1,6 +1,7 @@
 #include <cute/tensor.hpp>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <random>
 
 // #include "ref.h"
 #include "utils.h"
@@ -1093,10 +1094,19 @@ int main(int argc, char *argv[])
   }
 
   // NT: A is K×M, B is K×N (column-major M×K and N×K stored row-major)
-  thrust::host_vector<TA> h_A(K * M, TA(1.0));
-  thrust::host_vector<TB> h_B(K * N, TB(1.0));
+  // Use non-uniform random inputs (fixed seed for reproducibility). All-ones
+  // inputs cannot catch k-tile ordering/duplication bugs in the pipeline, since
+  // every k-tile contributes the same value regardless of order.
+  thrust::host_vector<TA> h_A(K * M);
+  thrust::host_vector<TB> h_B(K * N);
   thrust::host_vector<TC> h_C(M * N, TC(0.0));
   thrust::host_vector<TC> h_RefC(M * N, TC(0.0));
+  {
+    std::mt19937 gen(12345);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (auto &a : h_A) a = TA(dist(gen));
+    for (auto &b : h_B) b = TB(dist(gen));
+  }
 
   thrust::device_vector<TA> d_A = h_A;
   thrust::device_vector<TB> d_B = h_B;
@@ -1116,7 +1126,7 @@ int main(int argc, char *argv[])
       d_B.data().get(),
       d_RefC.data().get(),
       1.0, 0.0,
-      false, true,
+      true, false,
       warmup_iters, bench_iters);
 
   for (int i = 0; i < warmup_iters; i++)

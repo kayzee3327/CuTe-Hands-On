@@ -797,6 +797,15 @@ void call_sgemm_opt86_nt_v3a(TA *A, TB *B, TC *C,
                                            alpha, beta);
 }
 
+// Backing storage for v4's dynamic shared memory. array_aligned keeps each
+// operand 16-byte aligned so the uint128_t (LDS.128/STS.128) copies stay legal.
+template <class ElementA, class ElementB, class SmemLayoutA, class SmemLayoutB>
+struct SharedStorageV4
+{
+  cute::array_aligned<ElementA, cute::cosize_v<SmemLayoutA>> A;
+  cute::array_aligned<ElementB, cute::cosize_v<SmemLayoutB>> B;
+};
+
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class TiledCopyA,
           class TB, class BStride, class BSmemLayout, class TiledCopyB,
@@ -834,12 +843,13 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   CUTE_STATIC_ASSERT_V(size<0>(CSmemLayout{}) == size<0>(cta_tiler));
   CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<1>(cta_tiler));
 
-  // consider using dynamic allocation for multi-stage due to 48KB limit per CTA
-  // but in our case 1 stage only uses 8192 bytes
-  __shared__ TA smemA[cosize_v<ASmemLayout>];
-  __shared__ TB smemB[cosize_v<BSmemLayout>];
-  Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout);
-  Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout);
+  // Dynamic shared memory: the host picks the byte count at launch, which keeps
+  // multi-stage pipelines (bP stages) from being pinned to the 48KB static cap.
+  extern __shared__ char smem_buf[];
+  using SharedStorage = SharedStorageV4<TA, TB, ASmemLayout, BSmemLayout>;
+  SharedStorage &smem = *reinterpret_cast<SharedStorage *>(smem_buf);
+  Tensor sA = make_tensor(make_smem_ptr(smem.A.data()), sA_layout);
+  Tensor sB = make_tensor(make_smem_ptr(smem.B.data()), sB_layout);
 
   ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
   Tensor tAgA = thr_copy_a.partition_S(gA);         // (CPY,CPY_M,CPY_K,k)
@@ -1011,7 +1021,7 @@ void call_sgemm_opt86_nt_v4(TA *A, TB *B, TC *C,
   auto dC = make_stride(N, _1{});
 
   auto bM = _128{};
-  auto bN = _128{};
+  auto bN = _256{};
   auto bK = _8{};
   auto cta_tiler = make_shape(bM, bN, bK);
   auto bP = _2{};
@@ -1038,7 +1048,10 @@ void call_sgemm_opt86_nt_v4(TA *A, TB *B, TC *C,
   dim3 dimBlock(32 * 8);
   dim3 dimGrid(ceil_div(M, bM),
                ceil_div(N, bN));
-  sgemm_opt86_nt_v4<<<dimGrid, dimBlock>>>(prob_shape, cta_tiler,
+
+  // Dynamic shared memory size for the SharedStorageV4 backing struct.
+  int smem_size = int(sizeof(SharedStorageV4<TA, TB, decltype(sA), decltype(sB)>));
+  sgemm_opt86_nt_v4<<<dimGrid, dimBlock, smem_size>>>(prob_shape, cta_tiler,
                                            A, dA, sA, copyA,
                                            B, dB, sB, copyB,
                                            C, dC, sC, mmaC,

@@ -138,7 +138,7 @@ __global__ void sgemm_opt86_nt_v1(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
   // CUTE_STATIC_ASSERT_V(size(tCrC) == size(tCrC)) omitted
 
   // ---------------------------------------------
@@ -324,7 +324,7 @@ __global__ void sgemm_opt86_nt_v2(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
 
   // SMEM->RMEM TiledCopy: 128-bit (LDS.128) loads, retiled to match MMA's A/B partitioning.
   // Requires the MMA's PermutationMNK to make each thread's per-M / per-N elements contiguous
@@ -509,7 +509,7 @@ __global__ void sgemm_opt86_nt_v3(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
 
   auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
   auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
@@ -698,7 +698,7 @@ __global__ void sgemm_opt86_nt_v3a(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
 
   auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
   auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
@@ -875,7 +875,7 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<2>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
 
   auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
   auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);

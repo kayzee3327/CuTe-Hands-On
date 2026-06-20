@@ -8,16 +8,6 @@
 
 #define OPT_CALLER call_sgemm_opt86_nt_v4
 
-// Sweep knobs for v4 pipeline (overridable from build):
-//   SGEMM_BP   = SMEM stages (bP in call_sgemm_opt86_nt_v4)
-//   SGEMM_KREG = LDG register prefetch stages (K_PIPE_REG_MAX in sgemm_opt86_nt_v4)
-#ifndef SGEMM_BP
-#define SGEMM_BP 2
-#endif
-#ifndef SGEMM_KREG
-#define SGEMM_KREG 2
-#endif
-
 // In this v1 impl, we expand the implicit optimization of
 //  `gemm(mma, tCsA, tCsB, tCrC);`
 template <class ProblemShape, class CtaTiler,
@@ -857,13 +847,10 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
   Tensor tBgB = thr_copy_b.partition_S(gB);         // (CPY,CPY_N,CPY_K,k)
   Tensor tBsB = thr_copy_b.partition_D(sB);         // (CPY,CPY_N,CPY_K,PIPE)
-  auto K_PIPE_REG_MAX = Int<SGEMM_KREG>{};
-  // (CPY,CPY_M,CPY_K,K_PIPE_LDG)
-  Tensor tArA = make_tensor<float>(append(shape(tAsA(_,_,_,0)), K_PIPE_REG_MAX));
-  Tensor tBrB = make_tensor<float>(append(shape(tBsB(_,_,_,0)), K_PIPE_REG_MAX)); 
-  // In expectation: a little more registers here does not hurt performance, 
-  //  since there is still around 10,000 registers unused
-  //  and it is unlikely to add a thread block with these registers.
+  // Single-stage register buffer that relays each k-tile from GMEM into SMEM.
+  // (CPY,CPY_M,CPY_K)
+  Tensor tArA = make_tensor<float>(shape(tAsA(_,_,_,0)));
+  Tensor tBrB = make_tensor<float>(shape(tBsB(_,_,_,0)));
 
   CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tAsA));
   CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tArA));
@@ -914,33 +901,31 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   }
 #endif
 
-  // LDG prologue
-  // issue LDG loads
+  // LDG/STS prologue
   //
+  // With a single register buffer, each k-tile is relayed GMEM -> reg -> SMEM.
+  // Fill (K_PIPE_SMEM_MAX - 1) SMEM stages, then stage one more k-tile in the
+  // register buffer so the mainloop's first STS has data ready.
   int k_tile_count = size<3>(tAgA); // same as size<3>(gA), but we work on tAgA, not a constant in pipeline design
   int k_tile_next = 0;
-  for (int k_pipe = 0; k_pipe < K_PIPE_REG_MAX; k_pipe++)
-  {
-    copy(copy_a, tAgA(_,_,_,k_tile_next), tArA(_,_,_,k_pipe));
-    copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB(_,_,_,k_pipe));
-    k_tile_count --;
-    if (k_tile_count > 0) k_tile_next ++;
-  }
-  int reg_pipe_write = 0;
-
-  // STS prologue
-  // 
   auto K_PIPE_SMEM_MAX = size<3>(tAsA);
-  int reg_pipe_read = 0;
   int smem_pipe_write = 0;
   for (int k_pipe = 0; k_pipe < K_PIPE_SMEM_MAX - 1; k_pipe++)
   {
-    copy(tArA(_,_,_,reg_pipe_read), tAsA(_,_,_,smem_pipe_write));
-    copy(tBrB(_,_,_,reg_pipe_read), tBsB(_,_,_,smem_pipe_write));
-    reg_pipe_read   = (reg_pipe_read   + 1) % K_PIPE_REG_MAX;
+    copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+    copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
+    k_tile_count --;
+    if (k_tile_count > 0) k_tile_next ++;
+    copy(tArA, tAsA(_,_,_,smem_pipe_write));
+    copy(tBrB, tBsB(_,_,_,smem_pipe_write));
     smem_pipe_write = (smem_pipe_write + 1) % K_PIPE_SMEM_MAX;
   }
-  
+  // Stage the next k-tile in registers (drained to SMEM by the mainloop).
+  copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+  copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
+  k_tile_count --;
+  if (k_tile_count > 0) k_tile_next ++;
+
 
   // S2R prologue
   //
@@ -956,7 +941,7 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   }
   
   CUTE_NO_UNROLL
-  while (k_tile_count + K_PIPE_REG_MAX > 0)
+  while (k_tile_count + K_PIPE_SMEM_MAX > 0)
   {
     CUTE_UNROLL
     for (int k_block = 0; k_block < K_BLOCK_MAX; k_block++)
@@ -973,17 +958,19 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
       copy(s2r_tiled_copy_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
       copy(s2r_tiled_copy_b, tXsB_p(_,_,k_block_next), tXrB(_,_,k_block_next));
 
-      if (k_block == 0) 
+      if (k_block == 0)
       {
-        copy(tArA(_,_,_,reg_pipe_read), tAsA(_,_,_,smem_pipe_write));
-        copy(tBrB(_,_,_,reg_pipe_read), tBsB(_,_,_,smem_pipe_write));
-        reg_pipe_read   = (reg_pipe_read   + 1) % K_PIPE_REG_MAX;
+        // Drain the staged k-tile from the register buffer into the next SMEM
+        // stage, then load the following k-tile into the same register buffer.
+        // STS reads tArA before LDG overwrites it, so the GMEM load latency is
+        // hidden across the mainloop iteration.
+        copy(tArA, tAsA(_,_,_,smem_pipe_write));
+        copy(tBrB, tBsB(_,_,_,smem_pipe_write));
         smem_pipe_write = (smem_pipe_write + 1) % K_PIPE_SMEM_MAX;
-        copy(copy_a, tAgA(_,_,_,k_tile_next), tArA(_,_,_,reg_pipe_write));
-        copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB(_,_,_,reg_pipe_write));
+        copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+        copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
         k_tile_count--;
         if (k_tile_count > 0) k_tile_next++;
-        reg_pipe_write = (reg_pipe_write + 1) % K_PIPE_REG_MAX;
       }
       
       auto M = size<1>(tCrA);
@@ -1027,7 +1014,7 @@ void call_sgemm_opt86_nt_v4(TA *A, TB *B, TC *C,
   auto bN = _128{};
   auto bK = _8{};
   auto cta_tiler = make_shape(bM, bN, bK);
-  auto bP = Int<SGEMM_BP>{};
+  auto bP = _2{};
 
   auto sA_atom = make_layout(make_shape(bM, bK));
   auto sB_atom = make_layout(make_shape(bN, bK));

@@ -23,7 +23,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # old versions of cmake does not know how to compile cuda >=c++20
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 80 90a) # Build for Ampere (80) and Hopper (90a)
+set(CMAKE_CUDA_ARCHITECTURES 86 90a) # Build for Ampere (86) and Hopper (90a)
 
 # --- 2. Dependencies ---
 # We point directly to the submodule.

@@ -6,7 +6,7 @@
 // #include "ref.h"
 #include "utils.h"
 
-#define OPT_CALLER call_sgemm_opt86_nt_v4
+#define OPT_CALLER call_sgemm_opt86_nt_v4b
 
 // In this v1 impl, we expand the implicit optimization of
 //  `gemm(mma, tCsA, tCsB, tCrC);`
@@ -800,7 +800,7 @@ void call_sgemm_opt86_nt_v3a(TA *A, TB *B, TC *C,
 // Backing storage for v4's dynamic shared memory. array_aligned keeps each
 // operand 16-byte aligned so the uint128_t (LDS.128/STS.128) copies stay legal.
 template <class ElementA, class ElementB, class SmemLayoutA, class SmemLayoutB>
-struct SharedStorageV4
+struct SharedStorageV4failed
 {
   cute::array_aligned<ElementA, cute::cosize_v<SmemLayoutA>> A;
   cute::array_aligned<ElementB, cute::cosize_v<SmemLayoutB>> B;
@@ -811,7 +811,8 @@ template <class ProblemShape, class CtaTiler,
           class TB, class BStride, class BSmemLayout, class TiledCopyB,
           class TC, class CStride, class CSmemLayout, class TiledMma,
           class Alpha, class Beta>
-__global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
+/// @brief use register prefetch, higher reuse ratio and SMEM buffer
+__global__ void sgemm_opt86_nt_v4failed(ProblemShape shape_MNK, CtaTiler cta_tiler,
                                   TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
                                   TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
                                   TC *C, CStride dC, CSmemLayout, TiledMma mma,
@@ -846,7 +847,7 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
   // Dynamic shared memory: the host picks the byte count at launch, which keeps
   // multi-stage pipelines (bP stages) from being pinned to the 48KB static cap.
   extern __shared__ char smem_buf[];
-  using SharedStorage = SharedStorageV4<TA, TB, ASmemLayout, BSmemLayout>;
+  using SharedStorage = SharedStorageV4failed<TA, TB, ASmemLayout, BSmemLayout>;
   SharedStorage &smem = *reinterpret_cast<SharedStorage *>(smem_buf);
   Tensor sA = make_tensor(make_smem_ptr(smem.A.data()), sA_layout);
   Tensor sB = make_tensor(make_smem_ptr(smem.B.data()), sB_layout);
@@ -1008,7 +1009,7 @@ __global__ void sgemm_opt86_nt_v4(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
-void call_sgemm_opt86_nt_v4(TA *A, TB *B, TC *C,
+void call_sgemm_opt86_nt_v4failed(TA *A, TB *B, TC *C,
                             int M, int N, int K,
                             Alpha alpha, Beta beta)
 {
@@ -1050,13 +1051,420 @@ void call_sgemm_opt86_nt_v4(TA *A, TB *B, TC *C,
                ceil_div(N, bN));
 
   // Dynamic shared memory size for the SharedStorageV4 backing struct.
-  int smem_size = int(sizeof(SharedStorageV4<TA, TB, decltype(sA), decltype(sB)>));
-  sgemm_opt86_nt_v4<<<dimGrid, dimBlock, smem_size>>>(prob_shape, cta_tiler,
+  int smem_size = int(sizeof(SharedStorageV4failed<TA, TB, decltype(sA), decltype(sB)>));
+  sgemm_opt86_nt_v4failed<<<dimGrid, dimBlock, smem_size>>>(prob_shape, cta_tiler,
                                            A, dA, sA, copyA,
                                            B, dB, sB, copyB,
                                            C, dC, sC, mmaC,
                                            alpha, beta);
 }
+
+template <class ElementA, class ElementB, class SmemLayoutA, class SmemLayoutB>
+struct SharedStorage
+{
+  cute::array_aligned<ElementA, cute::cosize_v<SmemLayoutA>> A;
+  cute::array_aligned<ElementB, cute::cosize_v<SmemLayoutB>> B;
+};
+
+template <class ProblemShape, class CtaTiler,
+          class TA, class AStride, class ASmemLayout, class TiledCopyA,
+          class TB, class BStride, class BSmemLayout, class TiledCopyB,
+          class TC, class CStride, class CSmemLayout, class TiledMma,
+          class Alpha, class Beta>
+// increase thread tile size compared to v3a
+__global__ void sgemm_opt86_nt_v4a(ProblemShape shape_MNK, CtaTiler cta_tiler,
+                                  TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
+                                  TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
+                                  TC *C, CStride dC, CSmemLayout, TiledMma mma,
+                                  Alpha alpha, Beta beta)
+{
+  using namespace cute;
+  
+  CUTE_STATIC_ASSERT_V(rank(shape_MNK) == _3{});
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 2>(shape_MNK), dA));
+  CUTE_STATIC_ASSERT_V(congruent(select<1, 2>(shape_MNK), dB));
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 1>(shape_MNK), dC));
+
+  Tensor mA = make_tensor(make_gmem_ptr(A), select<0, 2>(shape_MNK), dA);
+  Tensor mB = make_tensor(make_gmem_ptr(B), select<1, 2>(shape_MNK), dB);
+  Tensor mC = make_tensor(make_gmem_ptr(C), select<0, 1>(shape_MNK), dC);
+
+  auto coord = make_coord(blockIdx.x, blockIdx.y, _);
+  Tensor gA = local_tile(mA, select<0, 2>(cta_tiler), select<0, 2>(coord));
+  Tensor gB = local_tile(mB, select<1, 2>(cta_tiler), select<1, 2>(coord));
+  Tensor gC = local_tile(mC, select<0, 1>(cta_tiler), select<0, 1>(coord));
+
+  static_assert(is_static_v<ASmemLayout>);
+  static_assert(is_static_v<BSmemLayout>);
+  static_assert(is_static_v<CSmemLayout>);
+  CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(CSmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<1>(cta_tiler));
+
+  extern __shared__ char raw_smem[];
+  using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
+  // must use `&` reference, otherwise the whole smem pipeline is copied to local memory
+  SharedStorage &smem = *reinterpret_cast<SharedStorage*>(raw_smem);
+  Tensor sA = make_tensor(make_smem_ptr(smem.A.data()), sA_layout);
+  Tensor sB = make_tensor(make_smem_ptr(smem.B.data()), sB_layout);
+
+  ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+  Tensor tAgA = thr_copy_a.partition_S(gA);
+  Tensor tAsA = thr_copy_a.partition_D(sA);
+  ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
+  Tensor tBgB = thr_copy_b.partition_S(gB);
+  Tensor tBsB = thr_copy_b.partition_D(sB);
+  Tensor tArA = make_fragment_like(tAsA);
+  Tensor tBrB = make_fragment_like(tBsB);
+
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tArA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tArA));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBrB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBrB));
+
+  copy(copy_a, tAgA(_, _, _, 0), tArA);
+  copy(copy_b, tBgB(_, _, _, 0), tBrB);
+
+  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+  Tensor tCsA = thr_mma.partition_A(sA);
+  Tensor tCsB = thr_mma.partition_B(sB);
+  Tensor tCgC = thr_mma.partition_C(gC);
+  Tensor tCrC = make_fragment_like(tCgC);
+
+  CUTE_STATIC_ASSERT_V(shape(tCgC) == shape(tCrC));
+  CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tCgC) == size<1>(tCsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tCgC) == size<1>(tCsB));
+
+  auto K_TILE_MAX = size<3>(tAgA); // same as size<3>(gA), but we work on tAgA
+
+  auto K_BLOCK_MAX = size<2>(tCsA);
+  Tensor tCrA = thr_mma.make_fragment_A(tCsA);
+  Tensor tCrB = thr_mma.make_fragment_B(tCsB);
+  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
+
+  auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
+  auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
+  Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+  Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+
+  auto s2r_tiled_copy_b = make_tiled_copy_B(Copy_Atom<UniversalCopy<uint128_t>, TB>{}, mma);
+  auto s2r_thr_copy_b   = s2r_tiled_copy_b.get_slice(threadIdx.x);
+  Tensor tXsB = s2r_thr_copy_b.partition_S(sB);
+  Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);
+
+  for (uint k_tile = 0; k_tile < K_TILE_MAX; k_tile++)
+  {
+    __syncthreads();
+    copy(tArA, tAsA);
+    copy(tBrB, tBsB);
+    __syncthreads();
+
+    int k_tile_next = k_tile == K_TILE_MAX - 1 ? k_tile : k_tile + 1;
+    copy(copy_a, tAgA(_, _, _, k_tile_next), tArA);
+    copy(copy_b, tBgB(_, _, _, k_tile_next), tBrB);
+
+    // remove register prefetch in v3
+    CUTE_UNROLL
+    for (int k_block = 0; k_block < K_BLOCK_MAX; k_block++)
+    {
+      
+      copy(s2r_tiled_copy_a, tXsA(_, _, k_block), tXrA(_, _, k_block));
+      copy(s2r_tiled_copy_b, tXsB(_, _, k_block), tXrB(_, _, k_block));
+
+      auto M = size<1>(tCrA);
+      auto N = size<1>(tCrB);
+
+      for (int m = 0; m < M; m += 2)
+      {
+        for (int n = 0; n < N; ++n)
+        {
+          int ns = (m & 2) ? N-1-n : n;
+          gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+          if (m+1 < M) 
+          {
+            gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+          }
+        }
+      }
+    }
+  }
+
+  axpby(alpha, tCrC, beta, tCgC);
+}
+
+template <class TA, class TB, class TC,
+          class Alpha, class Beta>
+void call_sgemm_opt86_nt_v4a(TA *A, TB *B, TC *C,
+                            int M, int N, int K,
+                            Alpha alpha, Beta beta)
+{
+  using namespace cute;
+
+  auto prob_shape = make_shape(M, N, K);
+
+  auto dA = make_stride(_1{}, M);
+  auto dB = make_stride(_1{}, N);
+  auto dC = make_stride(N, _1{});
+
+  auto bM = _128{};
+  auto bN = _256{};
+  auto bK = _8{};
+  auto cta_tiler = make_shape(bM, bN, bK);
+
+  auto sA = make_layout(make_shape(bM, bK));
+  auto sB = make_layout(make_shape(bN, bK));
+  auto sC = make_layout(make_shape(bM, bN));
+
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+
+  TiledMMA mmaC = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
+                                 Layout<Shape<_16, _16, _1>>{},
+                                 Tile<Layout<Shape<_16, _4>, Stride<_4, _1>>,
+                                      Layout<Shape<_16, _4>, Stride<_4, _1>>,
+                                      _1>{});
+
+  dim3 dimBlock(32 * 8);
+  dim3 dimGrid(ceil_div(M, bM),
+               ceil_div(N, bN));
+  int smem_size = (bM + bN) * bK * sizeof(float);
+  sgemm_opt86_nt_v4a<<<dimGrid, dimBlock, smem_size>>>(prob_shape, cta_tiler,
+                                           A, dA, sA, copyA,
+                                           B, dB, sB, copyB,
+                                           C, dC, sC, mmaC,
+                                           alpha, beta);
+}
+
+template <class ProblemShape, class CtaTiler,
+          class TA, class AStride, class ASmemLayout, class TiledCopyA,
+          class TB, class BStride, class BSmemLayout, class TiledCopyB,
+          class TC, class CStride, class CSmemLayout, class TiledMma,
+          class Alpha, class Beta>
+// use SMEM double buffer compared to v4a
+__global__ void sgemm_opt86_nt_v4b(ProblemShape shape_MNK, CtaTiler cta_tiler,
+                                  TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
+                                  TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
+                                  TC *C, CStride dC, CSmemLayout, TiledMma mma,
+                                  Alpha alpha, Beta beta)
+{
+  using namespace cute;
+  
+  CUTE_STATIC_ASSERT_V(rank(shape_MNK) == _3{});
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 2>(shape_MNK), dA));
+  CUTE_STATIC_ASSERT_V(congruent(select<1, 2>(shape_MNK), dB));
+  CUTE_STATIC_ASSERT_V(congruent(select<0, 1>(shape_MNK), dC));
+
+  Tensor mA = make_tensor(make_gmem_ptr(A), select<0, 2>(shape_MNK), dA);
+  Tensor mB = make_tensor(make_gmem_ptr(B), select<1, 2>(shape_MNK), dB);
+  Tensor mC = make_tensor(make_gmem_ptr(C), select<0, 1>(shape_MNK), dC);
+
+  auto coord = make_coord(blockIdx.x, blockIdx.y, _);
+  Tensor gA = local_tile(mA, select<0, 2>(cta_tiler), select<0, 2>(coord));
+  Tensor gB = local_tile(mB, select<1, 2>(cta_tiler), select<1, 2>(coord));
+  Tensor gC = local_tile(mC, select<0, 1>(cta_tiler), select<0, 1>(coord));
+
+  static_assert(is_static_v<ASmemLayout>);
+  static_assert(is_static_v<BSmemLayout>);
+  static_assert(is_static_v<CSmemLayout>);
+  CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<0>(CSmemLayout{}) == size<0>(cta_tiler));
+  CUTE_STATIC_ASSERT_V(size<1>(CSmemLayout{}) == size<1>(cta_tiler));
+
+  extern __shared__ char raw_smem[];
+  using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
+  // must use `&` reference, otherwise the whole smem pipeline is copied to local memory
+  SharedStorage &smem = *reinterpret_cast<SharedStorage*>(raw_smem); 
+  Tensor sA = make_tensor(make_smem_ptr(smem.A.data()), sA_layout);
+  Tensor sB = make_tensor(make_smem_ptr(smem.B.data()), sB_layout);
+
+  ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+  Tensor tAgA = thr_copy_a.partition_S(gA);
+  Tensor tAsA = thr_copy_a.partition_D(sA);
+  ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
+  Tensor tBgB = thr_copy_b.partition_S(gB);
+  Tensor tBsB = thr_copy_b.partition_D(sB);
+  Tensor tArA = make_fragment_like(tAsA(_,_,_,0));
+  Tensor tBrB = make_fragment_like(tBsB(_,_,_,0));
+
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tArA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tAsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tArA));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBrB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBsB));
+  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBrB));
+
+  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+  Tensor tCsA = thr_mma.partition_A(sA(_,_,0));
+  Tensor tCsB = thr_mma.partition_B(sB(_,_,0));
+  Tensor tCgC = thr_mma.partition_C(gC);
+  Tensor tCrC = make_fragment_like(tCgC);
+
+  CUTE_STATIC_ASSERT_V(shape(tCgC) == shape(tCrC));
+  CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));
+  CUTE_STATIC_ASSERT_V(size<1>(tCgC) == size<1>(tCsA));
+  CUTE_STATIC_ASSERT_V(size<2>(tCgC) == size<1>(tCsB));
+
+  auto K_TILE_MAX = size<3>(tAgA); // same as size<3>(gA), but we work on tAgA
+
+  auto K_BLOCK_MAX = size<2>(tCsA);
+  Tensor tCrA = thr_mma.make_fragment_A(tCsA);
+  Tensor tCrB = thr_mma.make_fragment_B(tCsB);
+  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tCrC));
+  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(tCrC));
+
+  auto s2r_tiled_copy_a = make_tiled_copy_A(Copy_Atom<UniversalCopy<uint128_t>, TA>{}, mma);
+  auto s2r_thr_copy_a   = s2r_tiled_copy_a.get_slice(threadIdx.x);
+  Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+  Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+
+  auto s2r_tiled_copy_b = make_tiled_copy_B(Copy_Atom<UniversalCopy<uint128_t>, TB>{}, mma);
+  auto s2r_thr_copy_b   = s2r_tiled_copy_b.get_slice(threadIdx.x);
+  Tensor tXsB = s2r_thr_copy_b.partition_S(sB);
+  Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);
+
+  // SMEM buffer prologue
+  int K_PIPE_MAX = size<3>(tAsA);
+  int k_tile_count = K_TILE_MAX;
+  int k_tile_next = 0;
+  copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+  copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
+  k_tile_count--;
+  if (k_tile_count > 0) { k_tile_next++; }
+  for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; k_pipe++)
+  {
+    copy(tArA, tAsA(_,_,_,k_pipe));
+    copy(tBrB, tBsB(_,_,_,k_pipe));
+    __syncthreads();
+    copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+    copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
+    k_tile_count--;
+    if (k_tile_count > 0) { k_tile_next++; }
+  }
+
+  int smem_pipe_read = 0;
+  int smem_pipe_write = K_PIPE_MAX - 1;
+  Tensor tXsA_p = tXsA(_,_,_,smem_pipe_read);
+  Tensor tXsB_p = tXsB(_,_,_,smem_pipe_read);
+
+  while (k_tile_count + K_PIPE_MAX > 0)
+  {
+    CUTE_UNROLL
+    for (int k_block = 0; k_block < K_BLOCK_MAX; k_block++)
+    {
+      copy(s2r_tiled_copy_a, tXsA_p(_,_,k_block), tXrA(_,_,k_block));
+      copy(s2r_tiled_copy_b, tXsB_p(_,_,k_block), tXrB(_,_,k_block));
+
+      auto M = size<1>(tCrA);
+      auto N = size<1>(tCrB);
+
+      if (k_block == 0)
+      {
+        copy(tArA, tAsA(_,_,_,smem_pipe_write));
+        copy(tBrB, tBsB(_,_,_,smem_pipe_write));
+        smem_pipe_write = (smem_pipe_write + 1) % K_PIPE_MAX;
+        __syncthreads();
+        copy(copy_a, tAgA(_,_,_,k_tile_next), tArA);
+        copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
+        k_tile_count--;
+        if (k_tile_count > 0) { k_tile_next++; }
+      }
+
+      for (int m = 0; m < M; m += 2)
+      {
+        for (int n = 0; n < N; ++n)
+        {
+          int ns = (m & 2) ? N-1-n : n;
+          gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+          if (m+1 < M) 
+          {
+            gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+          }
+        }
+      }
+
+      if (k_block == K_BLOCK_MAX - 1)
+      {
+        smem_pipe_read = (smem_pipe_read + 1) % K_PIPE_MAX;
+        tXsA_p = tXsA(_,_,_,smem_pipe_read);
+        tXsB_p = tXsB(_,_,_,smem_pipe_read);
+        __syncthreads();
+      }
+    }
+  }
+
+  axpby(alpha, tCrC, beta, tCgC);
+}
+
+template <class TA, class TB, class TC,
+          class Alpha, class Beta>
+void call_sgemm_opt86_nt_v4b(TA *A, TB *B, TC *C,
+                            int M, int N, int K,
+                            Alpha alpha, Beta beta)
+{
+  using namespace cute;
+
+  auto prob_shape = make_shape(M, N, K);
+
+  auto dA = make_stride(_1{}, M);
+  auto dB = make_stride(_1{}, N);
+  auto dC = make_stride(N, _1{});
+
+  auto bM = _128{};
+  auto bN = _256{};
+  auto bK = _8{};
+  auto cta_tiler = make_shape(bM, bN, bK);
+  auto bP = _4{};
+
+  auto sA_atom = make_layout(make_shape(bM, bK));
+  auto sB_atom = make_layout(make_shape(bN, bK));
+  auto sA = tile_to_shape(sA_atom, make_shape(bM, bK, bP));
+  auto sB = tile_to_shape(sB_atom, make_shape(bN, bK, bP));
+  auto sC = make_layout(make_shape(bM, bN));
+
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, float>{},
+                                    Layout<Shape<_32, _8>>{},
+                                    Layout<Shape<_4, _1>>{});
+
+  TiledMMA mmaC = make_tiled_mma(MMA_Atom<UniversalFMA<float>>{},
+                                 Layout<Shape<_16, _16, _1>>{},
+                                 Tile<Layout<Shape<_16, _4>, Stride<_4, _1>>,
+                                      Layout<Shape<_16, _4>, Stride<_4, _1>>,
+                                      _1>{});
+
+  dim3 dimBlock(32 * 8);
+  dim3 dimGrid(ceil_div(M, bM),
+               ceil_div(N, bN));
+  int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>));
+  // note that smem_size must be in unit of bytes
+  sgemm_opt86_nt_v4b<<<dimGrid, dimBlock, smem_size>>>(prob_shape, cta_tiler,
+                                           A, dA, sA, copyA,
+                                           B, dB, sB, copyB,
+                                           C, dC, sC, mmaC,
+                                           alpha, beta);
+}
+
+
 
 
 int main(int argc, char *argv[])

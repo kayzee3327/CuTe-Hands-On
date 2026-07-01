@@ -2086,50 +2086,51 @@ __global__ void sgemm_opt86_nt_v4e(ProblemShape shape_MNK, CtaTiler cta_tiler,
     {
       auto M = size<1>(tCrA);
       auto N = size<1>(tCrB);
-      
-      // FFMA prefix of current tile
-      // touch each value in A and B fragment once
-      //
-      // The first A value pair touches every B value.
-      {
-        constexpr int m = 0;
-        CUTE_UNROLL
-        for (int n = 0; n < N; ++n)
-        {
-          gemm(mma, tCrA(_,m+0,k_block), tCrB(_,n,k_block), tCrC(_,m+0,n));
-          if (m + 1 < M) 
-          {
-            gemm(mma, tCrA(_,m+1,k_block), tCrB(_,n,k_block), tCrC(_,m+1,n));
-          }
-        }
-      }
-      // Touch the remaining A values with one B value each.
-      CUTE_UNROLL
-      for (int m = 2; m < M; m += 2)
-      {
-        int ns0 = (m & 2) ? N - 1 : 0;
-        gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns0,k_block), tCrC(_,m+0,ns0));
-        if (m+1 < M) 
-        {
-          gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns0,k_block), tCrC(_,m+1,ns0));
-        }
-      }
-      
-
+      CUTE_STATIC_ASSERT_V(M % _2{} == _0{});
       if (k_block == K_BLOCK_MAX - 1)
       {
+        // rotate SMEM stage
         smem_pipe_read = (smem_pipe_read + 1) % K_PIPE_MAX;
         tXsA_p = tXsA(_,_,_,smem_pipe_read);
         tXsB_p = tXsB(_,_,_,smem_pipe_read);
         __syncthreads();
+        // LDS next_tile.block0
+        copy(s2r_tiled_copy_a, tXsA_p(_,_,_0{}), tXrA(_,_,_0{}));
+        copy(s2r_tiled_copy_b, tXsB_p(_,_,_0{}), tXrB(_,_,_0{}));
+        // all FFMA current_tile.block7
+        CUTE_UNROLL
+        for (int m = 0; m < M; m += 2)
+        {
+          CUTE_UNROLL
+          for (int n = 0; n < N; ++n)
+          {
+            int ns = (m & 2) ? N-1-n : n;
+            gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+            if (m+1 < M) 
+            {
+              gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+            }
+          }
+        }
       }
-
-      auto k_block_next = (k_block + _1{}) % K_BLOCK_MAX;
-      copy(s2r_tiled_copy_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
-      copy(s2r_tiled_copy_b, tXsB_p(_,_,k_block_next), tXrB(_,_,k_block_next));
-
-      if (k_block == 0)
+      else if (k_block == 0)
       {
+        // FFMA prefix of first block
+        int const M_SPLIT = M / 2;
+        CUTE_UNROLL
+        for (int m = 0; m < M_SPLIT; m += 2)
+        {
+          CUTE_UNROLL
+          for (int n = 0; n < N; ++n)
+          {
+            int ns = (m & 2) ? N - 1 - n : n; 
+            gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+            if (m + 1 < M) {
+              gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+            }
+          }
+        }
+        // pipeline-maintenance work
         copy(tArA, tAsA(_,_,_,smem_pipe_write));
         copy(tBrB, tBsB(_,_,_,smem_pipe_write));
         smem_pipe_write = (smem_pipe_write + 1) % K_PIPE_MAX;
@@ -2137,19 +2138,42 @@ __global__ void sgemm_opt86_nt_v4e(ProblemShape shape_MNK, CtaTiler cta_tiler,
         copy(copy_b, tBgB(_,_,_,k_tile_next), tBrB);
         k_tile_count--;
         if (k_tile_count > 0) { k_tile_next++; }
-      }
-
-      CUTE_UNROLL
-      for (int m = 2; m < M; m += 2)
-      {
+        // LDS next_tile.block1
+        copy(s2r_tiled_copy_a, tXsA_p(_,_,_1{}), tXrA(_,_,_1{}));
+        copy(s2r_tiled_copy_b, tXsB_p(_,_,_1{}), tXrB(_,_,_1{}));
+        // remaining FFMA suffix of block0
         CUTE_UNROLL
-        for (int n = 1; n < N; ++n)
+        for (int m = M_SPLIT; m < M; m += 2)
         {
-          int ns = (m & 2) ? N-1-n : n;
-          gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
-          if (m+1 < M) 
+          CUTE_UNROLL
+          for (int n = 0; n < N; ++n)
           {
-            gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+            int ns = (m & 2) ? N - 1 - n : n; 
+            gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+            if (m + 1 < M) {
+              gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+            }
+          }
+        }
+      }
+      else
+      {
+        // LDS next block
+        auto k_block_next = (k_block + _1{}) % K_BLOCK_MAX;
+        copy(s2r_tiled_copy_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
+        copy(s2r_tiled_copy_b, tXsB_p(_,_,k_block_next), tXrB(_,_,k_block_next));
+        // all FFMA current block
+        CUTE_UNROLL
+        for (int m = 0; m < M; m += 2)
+        {
+          CUTE_UNROLL
+          for (int n = 0; n < N; ++n)
+          {
+            int ns = (m & 2) ? N - 1 - n : n; 
+            gemm(mma, tCrA(_,m+0,k_block), tCrB(_,ns,k_block), tCrC(_,m+0,ns));
+            if (m + 1 < M) {
+              gemm(mma, tCrA(_,m+1,k_block), tCrB(_,ns,k_block), tCrC(_,m+1,ns));
+            }
           }
         }
       }

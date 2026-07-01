@@ -121,6 +121,7 @@ add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
 add_cute_example(sgemm_opt86 src/sgemm_opt86.cu)
 
 add_cute_demo(PermutationMNK demos/PermutationMNK.cu)
+add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu)
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed
 # add_cute_example(hopper_pingpong src/03_hopper/pingpong_gemm.cu)

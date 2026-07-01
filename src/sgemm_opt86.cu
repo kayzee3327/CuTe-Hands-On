@@ -2520,6 +2520,7 @@ template <class ProblemShape, class CtaTiler,
           class TC, class CStride, class CSmemLayout, class TiledMma,
           class Alpha, class Beta>
 // lower epilogue register pressure compared to v4d,v5
+// apply 2-stage register prefetch
 __global__ void sgemm_opt86_nt_v5a(ProblemShape shape_MNK, CtaTiler cta_tiler,
                                   TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a,
                                   TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b,
@@ -2630,6 +2631,8 @@ __global__ void sgemm_opt86_nt_v5a(ProblemShape shape_MNK, CtaTiler cta_tiler,
     __syncthreads();
     copy(s2r_tiled_copy_a, tXsA_p(_,_,_0{}), tXrA(_,_,_0{}));
     copy(s2r_tiled_copy_b, tXsB_p(_,_,_0{}), tXrB(_,_,_0{}));
+    copy(s2r_tiled_copy_a, tXsA_p(_,_,_1{}), tXrA(_,_,_1{}));
+    copy(s2r_tiled_copy_b, tXsB_p(_,_,_1{}), tXrB(_,_,_1{}));
   }
   
 
@@ -2638,7 +2641,7 @@ __global__ void sgemm_opt86_nt_v5a(ProblemShape shape_MNK, CtaTiler cta_tiler,
     CUTE_UNROLL
     for (int k_block = 0; k_block < K_BLOCK_MAX; k_block++)
     {
-      if (k_block == K_BLOCK_MAX - 1)
+      if (k_block == K_BLOCK_MAX - 2)
       {
         smem_pipe_read = (smem_pipe_read + 1) % K_PIPE_MAX;
         tXsA_p = tXsA(_,_,_,smem_pipe_read);
@@ -2647,7 +2650,7 @@ __global__ void sgemm_opt86_nt_v5a(ProblemShape shape_MNK, CtaTiler cta_tiler,
         __syncthreads();
       }
 
-      auto k_block_next = (k_block + _1{}) % K_BLOCK_MAX;
+      auto k_block_next = (k_block + _2{}) % K_BLOCK_MAX;
       copy(s2r_tiled_copy_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
       copy(s2r_tiled_copy_b, tXsB_p(_,_,k_block_next), tXrB(_,_,k_block_next));
 

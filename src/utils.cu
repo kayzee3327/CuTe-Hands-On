@@ -178,5 +178,6 @@ namespace utils
   // Explicit instantiations
   template void compare_tensors<float>(const float *d_test, const float *d_ref, int num_elements, float abs_tol, float rel_tol);
   template void compare_tensors<__half>(const __half *d_test, const __half *d_ref, int num_elements, float abs_tol, float rel_tol);
+  template void compare_tensors<__nv_bfloat16>(const __nv_bfloat16 *d_test, const __nv_bfloat16 *d_ref, int num_elements, float abs_tol, float rel_tol);
 
 } // namespace utils

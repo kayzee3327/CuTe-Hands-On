@@ -16,6 +16,7 @@ endforeach()
 option(KEEP_PTX "Keep intermediate PTX files" OFF)
 # Use -DKEEP_PTX_TARGET="sgemm_sm80" to limit PTX generation to one target
 set(KEEP_PTX_TARGET "" CACHE STRING "Specific target to keep PTX for (leave empty for all)")
+option(BUILD_FP8_CUTLASS_REF "Build the SM90 CUTLASS FP8 reference wrapper" OFF)
 
 # --- 1. Settings ---
 set(CMAKE_CXX_STANDARD 17)
@@ -120,8 +121,32 @@ add_cute_example(sgemm_2 src/examples/sgemm_2.cu)
 add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
 add_cute_example(sgemm_opt86 src/sgemm_opt86.cu)
 
-add_cute_demo(PermutationMNK demos/PermutationMNK.cu)
-add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu)
+# add_cute_demo(PermutationMNK demos/PermutationMNK.cu)
+# add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu)
+
+if(BUILD_FP8_CUTLASS_REF)
+  add_library(cutlass_fp8_reference STATIC src/cutlass_fp8_reference.cu)
+  target_include_directories(cutlass_fp8_reference PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_include_directories(cutlass_fp8_reference PRIVATE
+    ${CUTLASS_INCLUDE_DIRS}
+  )
+  target_compile_options(cutlass_fp8_reference PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -lineinfo>
+  )
+  set_target_properties(cutlass_fp8_reference PROPERTIES CUDA_ARCHITECTURES 90a)
+
+  add_executable(fp8_cutlass_reference_check src/fp8_cutlass_reference_check.cu)
+  target_include_directories(fp8_cutlass_reference_check PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_options(fp8_cutlass_reference_check PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -lineinfo>
+  )
+  set_target_properties(fp8_cutlass_reference_check PROPERTIES CUDA_ARCHITECTURES 90a)
+  target_link_libraries(fp8_cutlass_reference_check PRIVATE cutlass_fp8_reference)
+endif()
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed
 # add_cute_example(hopper_pingpong src/03_hopper/pingpong_gemm.cu)

@@ -12,13 +12,6 @@ namespace utils
       bool A_OP_T = false, bool B_OP_T = false,
       int warmup_iters = 1, int bench_iters = 10);
 
-  // Reference HGEMM (Half Precision with Tensor Cores, float accumulation)
-  void cublas_hgemm_reference(
-      int M, int N, int K,
-      const __half *d_A, const __half *d_B, __half *d_C,
-      float alpha = 1.0f, float beta = 0.0f,
-      bool A_OP_T = false, bool B_OP_T = false,
-      int warmup_iters = 1, int bench_iters = 10);
 
   // Compares a test tensor against a reference tensor and prints the results.
   // Both pointers must reside on the GPU (Device pointers).

@@ -15,7 +15,12 @@
     cublasStatus_t status = call;                                    \
     if (status != CUBLAS_STATUS_SUCCESS)                             \
     {                                                                \
-      std::cerr << "cuBLAS Error at line " << __LINE__ << std::endl; \
+      fprintf(stderr,                                                \
+            "cuBLAS error: %s (%s) at %s:%d\n",                      \
+            cublasGetStatusName(status),                             \
+            cublasGetStatusString(status),                           \
+            __FILE__,                                                \
+            __LINE__);                                               \
       exit(EXIT_FAILURE);                                            \
     }                                                                \
   } while (0)

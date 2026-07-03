@@ -25,6 +25,22 @@
     }                                                                \
   } while (0)
 
+#define CHECK_CUBLASLT(call)                                         \
+  do                                                                 \
+  {                                                                  \
+    cublasStatus_t status = call;                                    \
+    if (status != CUBLAS_STATUS_SUCCESS)                             \
+    {                                                                \
+      fprintf(stderr,                                                \
+            "cuBLAS error: %s (%s) at %s:%d\n",                      \
+            cublasLtGetStatusName(status),                           \
+            cublasLtGetStatusString(status),                         \
+            __FILE__,                                                \
+            __LINE__);                                               \
+      exit(EXIT_FAILURE);                                            \
+    }                                                                \
+  } while (0)
+
 namespace utils
 {
 
@@ -109,7 +125,7 @@ namespace utils
       int warmup_iters, int bench_iters)
   {
     cublasLtHandle_t handle;
-    CHECK_CUBLAS(cublasLtCreate(&handle));
+    CHECK_CUBLASLT(cublasLtCreate(&handle));
 
     cublasOperation_t OPA = A_OP_T ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t OPB = B_OP_T ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -123,13 +139,13 @@ namespace utils
     cublasLtMatrixLayout_t c_desc;
     cublasLtMatmulPreference_t preference;
 
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&matmul_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
     cublasOperation_t lt_op_a = OPB;
     cublasOperation_t lt_op_b = OPA;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
         matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA, &lt_op_a, sizeof(lt_op_a)));
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
         matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &lt_op_b, sizeof(lt_op_b)));
 
     uint64_t a_rows = B_OP_T ? K : N;
@@ -137,13 +153,13 @@ namespace utils
     uint64_t b_rows = A_OP_T ? M : K;
     uint64_t b_cols = A_OP_T ? K : M;
 
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_8F_E4M3, a_rows, a_cols, ldb));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_8F_E4M3, b_rows, b_cols, lda));
-    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_16BF, N, M, ldc));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_8F_E4M3, a_rows, a_cols, ldb));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_8F_E4M3, b_rows, b_cols, lda));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_16BF, N, M, ldc));
 
     constexpr uint64_t max_workspace_bytes = 32ull * 1024ull * 1024ull;
-    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+    CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
+    CHECK_CUBLASLT(cublasLtMatmulPreferenceSetAttribute(
         preference,
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &max_workspace_bytes,
@@ -151,7 +167,7 @@ namespace utils
 
     cublasLtMatmulHeuristicResult_t heuristic_result = {};
     int returned_results = 0;
-    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
+    CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(
         handle,
         matmul_desc,
         a_desc,
@@ -177,7 +193,7 @@ namespace utils
     }
 
     auto run_matmul = [&]() {
-      CHECK_CUBLAS(cublasLtMatmul(
+      CHECK_CUBLASLT(cublasLtMatmul(
           handle,
           matmul_desc,
           &alpha,

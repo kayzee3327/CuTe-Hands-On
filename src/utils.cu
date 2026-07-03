@@ -20,18 +20,6 @@
     }                                                                \
   } while (0)
 
-#define CHECK_CUDA(call)                                                       \
-  do                                                                           \
-  {                                                                            \
-    cudaError_t status = call;                                                 \
-    if (status != cudaSuccess)                                                 \
-    {                                                                          \
-      std::cerr << "CUDA Error at line " << __LINE__ << ": "                  \
-                << cudaGetErrorString(status) << std::endl;                   \
-      exit(EXIT_FAILURE);                                                      \
-    }                                                                          \
-  } while (0)
-
 namespace utils
 {
 
@@ -180,7 +168,7 @@ namespace utils
     size_t workspace_size = heuristic_result.workspaceSize;
     if (workspace_size > 0)
     {
-      CHECK_CUDA(cudaMalloc(&workspace, workspace_size));
+      cudaMalloc(&workspace, workspace_size);
     }
 
     auto run_matmul = [&]() {
@@ -208,24 +196,24 @@ namespace utils
     {
       run_matmul();
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
 
     // 2. Benchmark
     cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-    CHECK_CUDA(cudaEventRecord(start));
+    cudaEventRecord(start);
     for (int i = 0; i < bench_iters; ++i)
     {
       run_matmul();
     }
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
 
     // 3. Compute Metrics
     float ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
+    cudaEventElapsedTime(&ms, start, stop);
     float avg_ms = ms / bench_iters;
 
     double ops_per_gemm = 2.0 * static_cast<double>(M) * N * K;
@@ -237,11 +225,11 @@ namespace utils
               << " | Performance: " << std::fixed << std::setprecision(2) << tflops << " TFLOPS\n";
 
     // 4. Cleanup
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
     if (workspace != nullptr)
     {
-      CHECK_CUDA(cudaFree(workspace));
+      cudaFree(workspace);
     }
     cublasLtMatmulPreferenceDestroy(preference);
     cublasLtMatrixLayoutDestroy(c_desc);

@@ -127,12 +127,6 @@ namespace utils
     cublasLtHandle_t handle;
     CHECK_CUBLASLT(cublasLtCreate(&handle));
 
-    cublasOperation_t OPA = A_OP_T ? CUBLAS_OP_T : CUBLAS_OP_N;
-    cublasOperation_t OPB = B_OP_T ? CUBLAS_OP_T : CUBLAS_OP_N;
-    int lda = A_OP_T ? M : K;
-    int ldb = B_OP_T ? K : N;
-    int ldc = N;
-
     cublasLtMatmulDesc_t matmul_desc;
     cublasLtMatrixLayout_t a_desc;
     cublasLtMatrixLayout_t b_desc;
@@ -141,21 +135,31 @@ namespace utils
 
     CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    cublasOperation_t lt_op_a = OPB;
-    cublasOperation_t lt_op_b = OPA;
+    // Hopper FP8 cuBLASLt kernels require the Lt-level operation to be TN.
+    // The layout order below encodes the row-major user-facing transpose flags.
+    cublasOperation_t lt_op_a = CUBLAS_OP_T;
+    cublasOperation_t lt_op_b = CUBLAS_OP_N;
     CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
         matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA, &lt_op_a, sizeof(lt_op_a)));
     CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
         matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &lt_op_b, sizeof(lt_op_b)));
 
-    uint64_t a_rows = B_OP_T ? K : N;
-    uint64_t a_cols = B_OP_T ? N : K;
-    uint64_t b_rows = A_OP_T ? M : K;
-    uint64_t b_cols = A_OP_T ? K : M;
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+        &a_desc, CUDA_R_8F_E4M3, K, M, A_OP_T ? M : K));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+        &b_desc, CUDA_R_8F_E4M3, K, N, B_OP_T ? K : N));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+        &c_desc, CUDA_R_16BF, M, N, N));
 
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_8F_E4M3, a_rows, a_cols, ldb));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_8F_E4M3, b_rows, b_cols, lda));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_16BF, N, M, ldc));
+    cublasLtOrder_t a_order = A_OP_T ? CUBLASLT_ORDER_ROW : CUBLASLT_ORDER_COL;
+    cublasLtOrder_t b_order = B_OP_T ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+    cublasLtOrder_t c_order = CUBLASLT_ORDER_ROW;
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &a_order, sizeof(a_order)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &b_order, sizeof(b_order)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &c_order, sizeof(c_order)));
 
     constexpr uint64_t max_workspace_bytes = 32ull * 1024ull * 1024ull;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
@@ -197,9 +201,9 @@ namespace utils
           handle,
           matmul_desc,
           &alpha,
-          d_B,
-          a_desc,
           d_A,
+          a_desc,
+          d_B,
           b_desc,
           &beta,
           d_C,

@@ -23,7 +23,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # old versions of cmake does not know how to compile cuda >=c++20
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 86 90a) # Build for Ampere (86) and Hopper (90a)
+set(CUDA_ARCH_AMPERE 86)
+set(CUDA_ARCH_HOPPER 90a)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+  set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCH_AMPERE})
+endif()
 
 # --- 2. Dependencies ---
 # We point directly to the submodule.
@@ -44,12 +49,19 @@ add_library(utils STATIC
 # PUBLIC means any target that links against 'utils' will automatically 
 # be able to #include "utils.h"
 target_include_directories(utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(utils PUBLIC CUDA::cublas)
+target_link_libraries(utils PUBLIC CUDA::cublas CUDA::cublasLt)
+set_target_properties(utils PROPERTIES CUDA_ARCHITECTURES ${CUDA_ARCH_AMPERE})
 
 # --- 3. Helper Function to Add Examples ---
 # This macro saves you from writing 5 lines of cmake for every new file you create
 function(add_cute_example TARGET_NAME SOURCE_FILE)
   add_executable(${TARGET_NAME} ${SOURCE_FILE})
+
+  set(TARGET_CUDA_ARCH ${CUDA_ARCH_AMPERE})
+  if(ARGC GREATER 2)
+    set(TARGET_CUDA_ARCH "${ARGV2}")
+  endif()
+  set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${TARGET_CUDA_ARCH}")
     
   # Include paths for this target
   target_include_directories(${TARGET_NAME} PRIVATE 
@@ -103,6 +115,13 @@ endfunction()
 
 function(add_cute_demo TARGET_NAME SOURCE_FILE)
   add_executable(${TARGET_NAME} ${SOURCE_FILE})
+
+  set(TARGET_CUDA_ARCH ${CUDA_ARCH_AMPERE})
+  if(ARGC GREATER 2)
+    set(TARGET_CUDA_ARCH "${ARGV2}")
+  endif()
+  set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${TARGET_CUDA_ARCH}")
+
   target_include_directories(${TARGET_NAME} PRIVATE 
       ${CMAKE_CURRENT_SOURCE_DIR}/include # Your local headers
       ${CUTLASS_INCLUDE_DIRS}             # CUTLASS & CuTe headers
@@ -115,13 +134,14 @@ endfunction()
 # --- 4. Define Your Targets ---
 
 # Example 1: Basic SGEMM
-add_cute_example(sgemm_1 src/examples/sgemm_1.cu)
-add_cute_example(sgemm_2 src/examples/sgemm_2.cu)
-add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu)
-add_cute_example(sgemm_opt86 src/sgemm_opt86.cu)
+add_cute_example(sgemm_1 src/examples/sgemm_1.cu ${CUDA_ARCH_AMPERE})
+add_cute_example(sgemm_2 src/examples/sgemm_2.cu ${CUDA_ARCH_AMPERE})
+add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu ${CUDA_ARCH_AMPERE})
+add_cute_example(sgemm_opt86 src/sgemm_opt86.cu ${CUDA_ARCH_AMPERE})
+add_cute_example(cublaslt_fp8_bf16_reference_test src/examples/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
 
-add_cute_demo(PermutationMNK demos/PermutationMNK.cu)
-add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu)
+add_cute_demo(PermutationMNK demos/PermutationMNK.cu ${CUDA_ARCH_AMPERE})
+add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu ${CUDA_ARCH_AMPERE})
 # Example 2: Hopper Specific (Ping Pong)
 # You can override properties for specific targets if needed
 # add_cute_example(hopper_pingpong src/03_hopper/pingpong_gemm.cu)

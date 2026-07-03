@@ -10,18 +10,6 @@
 #include <string>
 #include <vector>
 
-#define CHECK_CUDA_TEST(call)                                                   \
-  do                                                                            \
-  {                                                                             \
-    cudaError_t status = call;                                                  \
-    if (status != cudaSuccess)                                                  \
-    {                                                                           \
-      std::cerr << "CUDA Error at line " << __LINE__ << ": "                   \
-                << cudaGetErrorString(status) << std::endl;                    \
-      std::exit(EXIT_FAILURE);                                                  \
-    }                                                                           \
-  } while (0)
-
 struct TestCase
 {
   int M;
@@ -117,13 +105,13 @@ bool run_case(const TestCase &tc)
   __nv_fp8_e4m3 *d_B = nullptr;
   __nv_bfloat16 *d_C = nullptr;
 
-  CHECK_CUDA_TEST(cudaMalloc(&d_A, a_elements * sizeof(__nv_fp8_e4m3)));
-  CHECK_CUDA_TEST(cudaMalloc(&d_B, b_elements * sizeof(__nv_fp8_e4m3)));
-  CHECK_CUDA_TEST(cudaMalloc(&d_C, c_elements * sizeof(__nv_bfloat16)));
+  cudaMalloc(&d_A, a_elements * sizeof(__nv_fp8_e4m3));
+  cudaMalloc(&d_B, b_elements * sizeof(__nv_fp8_e4m3));
+  cudaMalloc(&d_C, c_elements * sizeof(__nv_bfloat16));
 
-  CHECK_CUDA_TEST(cudaMemcpy(d_A, h_A.data(), a_elements * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice));
-  CHECK_CUDA_TEST(cudaMemcpy(d_B, h_B.data(), b_elements * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice));
-  CHECK_CUDA_TEST(cudaMemcpy(d_C, h_C_init.data(), c_elements * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+  cudaMemcpy(d_A, h_A.data(), a_elements * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_B, h_B.data(), b_elements * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_C, h_C_init.data(), c_elements * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice);
 
   utils::cublaslt_fp8_e4m3_bf16_reference(
       tc.M, tc.N, tc.K,
@@ -132,11 +120,11 @@ bool run_case(const TestCase &tc)
       tc.A_OP_T, tc.B_OP_T,
       0, 1);
 
-  CHECK_CUDA_TEST(cudaMemcpy(h_C_got.data(), d_C, c_elements * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+  cudaMemcpy(h_C_got.data(), d_C, c_elements * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 
-  CHECK_CUDA_TEST(cudaFree(d_C));
-  CHECK_CUDA_TEST(cudaFree(d_B));
-  CHECK_CUDA_TEST(cudaFree(d_A));
+  cudaFree(d_C);
+  cudaFree(d_B);
+  cudaFree(d_A);
 
   constexpr float abs_tol = 0.25f;
   constexpr float rel_tol = 0.03f;
@@ -195,10 +183,10 @@ bool run_case(const TestCase &tc)
 int main()
 {
   int device = 0;
-  CHECK_CUDA_TEST(cudaGetDevice(&device));
+  cudaGetDevice(&device);
 
   cudaDeviceProp prop = {};
-  CHECK_CUDA_TEST(cudaGetDeviceProperties(&prop, device));
+  cudaGetDeviceProperties(&prop, device);
   std::cout << "Running on " << prop.name
             << " (sm_" << prop.major << prop.minor << ")\n";
 

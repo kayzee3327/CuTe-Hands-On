@@ -14,12 +14,13 @@ namespace utils
       bool A_OP_T = false, bool B_OP_T = false,
       int warmup_iters = 1, int bench_iters = 10);
 
-  // Reference GEMM for FP8 E4M3 inputs, FP32 accumulation, BF16 output.
-  void cublaslt_fp8_e4m3_bf16_reference(
+  // TN-layout cuBLASLt reference GEMM for FP8 E4M3 inputs, FP32 accumulation, BF16 output.
+  // A: KxM column-major with op(A)=T, B: KxN column-major with op(B)=N,
+  // C/D: MxN column-major.
+  void cublaslt_fp8_e4m3_bf16_tn_reference(
       int M, int N, int K,
       const __nv_fp8_e4m3 *d_A, const __nv_fp8_e4m3 *d_B, __nv_bfloat16 *d_C,
       float alpha = 1.0f, float beta = 0.0f,
-      bool A_OP_T = false, bool B_OP_T = false,
       int warmup_iters = 1, int bench_iters = 10);
 
   // Compares a test tensor against a reference tensor and prints the results.

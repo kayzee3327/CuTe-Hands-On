@@ -114,14 +114,10 @@ namespace utils
     cublasDestroy(handle);
   }
 
-  // use transpose trick to avoid C^T
-  // also handle row-major data better
-
-  void cublaslt_fp8_e4m3_bf16_reference(
+  void cublaslt_fp8_e4m3_bf16_tn_reference(
       int M, int N, int K,
       const __nv_fp8_e4m3 *d_A, const __nv_fp8_e4m3 *d_B, __nv_bfloat16 *d_C,
       float alpha, float beta,
-      bool A_OP_T, bool B_OP_T,
       int warmup_iters, int bench_iters)
   {
     cublasLtHandle_t handle;
@@ -135,8 +131,6 @@ namespace utils
 
     CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    // Hopper FP8 cuBLASLt kernels require the Lt-level operation to be TN.
-    // The layout order below encodes the row-major user-facing transpose flags.
     cublasOperation_t lt_op_a = CUBLAS_OP_T;
     cublasOperation_t lt_op_b = CUBLAS_OP_N;
     CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
@@ -145,21 +139,11 @@ namespace utils
         matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &lt_op_b, sizeof(lt_op_b)));
 
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
-        &a_desc, CUDA_R_8F_E4M3, K, M, A_OP_T ? M : K));
+        &a_desc, CUDA_R_8F_E4M3, K, M, K));
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
-        &b_desc, CUDA_R_8F_E4M3, K, N, B_OP_T ? K : N));
+        &b_desc, CUDA_R_8F_E4M3, K, N, K));
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
-        &c_desc, CUDA_R_16BF, M, N, N));
-
-    cublasLtOrder_t a_order = A_OP_T ? CUBLASLT_ORDER_ROW : CUBLASLT_ORDER_COL;
-    cublasLtOrder_t b_order = B_OP_T ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
-    cublasLtOrder_t c_order = CUBLASLT_ORDER_ROW;
-    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
-        a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &a_order, sizeof(a_order)));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
-        b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &b_order, sizeof(b_order)));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
-        c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &c_order, sizeof(c_order)));
+        &c_desc, CUDA_R_16BF, M, N, M));
 
     constexpr uint64_t max_workspace_bytes = 32ull * 1024ull * 1024ull;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));

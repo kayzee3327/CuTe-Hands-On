@@ -16,6 +16,9 @@ endforeach()
 option(KEEP_PTX "Keep intermediate PTX files" OFF)
 # Use -DKEEP_PTX_TARGET="sgemm_sm80" to limit PTX generation to one target
 set(KEEP_PTX_TARGET "" CACHE STRING "Specific target to keep PTX for (leave empty for all)")
+option(BUILD_EXAMPLES "Build src/exmaples" OFF)
+option(BUILD_DEMOS "Build demos" OFF)
+option(BUILD_TESTS "Build tests" OFF)
 
 # --- 1. Settings ---
 set(CMAKE_CXX_STANDARD 17)
@@ -133,16 +136,16 @@ endfunction()
 
 # --- 4. Define Your Targets ---
 
-# Example 1: Basic SGEMM
 add_cute_example(sgemm_1 src/examples/sgemm_1.cu ${CUDA_ARCH_AMPERE})
 add_cute_example(sgemm_2 src/examples/sgemm_2.cu ${CUDA_ARCH_AMPERE})
 add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu ${CUDA_ARCH_AMPERE})
 add_cute_example(sgemm_opt86 src/sgemm_opt86.cu ${CUDA_ARCH_AMPERE})
-add_cute_example(cublaslt_fp8_bf16_reference_test src/examples/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
 
+if(BUILD_TESTS)
+add_cute_example(cublaslt_fp8_bf16_reference_test tests/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
+endif()
+
+if(BUILD_DEMOS)
 add_cute_demo(PermutationMNK demos/PermutationMNK.cu ${CUDA_ARCH_AMPERE})
 add_cute_demo(epilogue_axpby demos/epilogue_axpby.cu ${CUDA_ARCH_AMPERE})
-# Example 2: Hopper Specific (Ping Pong)
-# You can override properties for specific targets if needed
-# add_cute_example(hopper_pingpong src/03_hopper/pingpong_gemm.cu)
-# set_target_properties(hopper_pingpong PROPERTIES CUDA_ARCHITECTURES 90a)
+endif()

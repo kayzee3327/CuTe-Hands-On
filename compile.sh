@@ -15,7 +15,7 @@ spack load cuda@12.9.0
 echo "Job started on $(hostname)"
 echo "Job ID: $SLURM_JOB_ID"
 
-cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTS=ON
 cmake --build build
 
 

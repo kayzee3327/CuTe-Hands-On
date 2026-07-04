@@ -5,14 +5,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
-#SBATCH --time=04:00:00
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
+#SBATCH --gres=gpu:H100:1
 
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+SCRIPT_DIR=${PWD}
 SCRIPTS_DIR="${SCRIPT_DIR}/src/scripts"
+CUDA_COMPAT="${SCRIPT_DIR}/.cuda-12.9-compat"
 
 if [[ -f /home/spack/spack/share/spack/setup-env.sh ]]; then
   source /home/spack/spack/share/spack/setup-env.sh
@@ -25,6 +24,8 @@ if ! command -v nvcc >/dev/null 2>&1; then
   echo "ERROR: nvcc was not found. Load CUDA before running this script." >&2
   exit 1
 fi
+
+source /home/wangkaize/CuTe-Hands-On/.venv/bin/activate
 
 if ! python3 -c "import nvMatmulHeuristics" >/dev/null 2>&1
 then
@@ -78,8 +79,12 @@ nvcc --version
 gcc --version | head -n 1
 ldd --version | head -n 1
 
-python3 "${SCRIPTS_DIR}/validate_fp8_tnn_problems.py" "${PROBLEMS_FILE}"
+unset NVCC_PREPEND_FLAGS
+export NVCC_PREPEND_FLAGS="-I${CUDA_COMPAT}"
+echo "NVCC_PREPEND_FLAGS changes."
 
+python3 "${SCRIPTS_DIR}/validate_fp8_tnn_problems.py" "${PROBLEMS_FILE}"\
+&&\
 cmake -S "${CUTLASS_DIR}" -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_COMPILER="$(command -v nvcc)" \
@@ -97,8 +102,8 @@ cmake -S "${CUTLASS_DIR}" -B "${BUILD_DIR}" \
   -DCUTLASS_LIBRARY_HEURISTICS_CONFIGS_PER_PROBLEM="${CONFIGS_PER_PROBLEM}" \
   -DCUTLASS_LIBRARY_HEURISTICS_TESTLIST_FILE="${TESTLIST_FILE}" \
   -DCUTLASS_LIBRARY_HEURISTICS_GPU="${HEURISTICS_GPU}" \
-  -DCUTLASS_LIBRARY_HEURISTICS_RESTRICT_KERNELS="${RESTRICT_KERNELS}"
-
+  -DCUTLASS_LIBRARY_HEURISTICS_RESTRICT_KERNELS="${RESTRICT_KERNELS}"\
+&& \
 cmake --build "${BUILD_DIR}" --target cutlass_profiler -j "${BUILD_JOBS}"
 
 if [[ ! -s "${TESTLIST_FILE}" ]]; then
@@ -110,8 +115,8 @@ python3 "${SCRIPTS_DIR}/expand_cutlass_fp8_tnn_testlist.py" \
   "${TESTLIST_FILE}" \
   "${SWEEP_TESTLIST_FILE}" \
   --raster-orders "${RASTER_ORDERS}" \
-  --swizzle-sizes "${SWIZZLE_SIZES}"
-
+  --swizzle-sizes "${SWIZZLE_SIZES}" \
+&& \
 "${BUILD_DIR}/tools/profiler/cutlass_profiler" \
   --operation=Gemm \
   --providers=cutlass \
@@ -151,3 +156,5 @@ EpilogueSchedule, raster_order, and swizzle_size choices in:
   src/cutlass_fp8_gemm.cu
 
 EOF
+
+deactivate

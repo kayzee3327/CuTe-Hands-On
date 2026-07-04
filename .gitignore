@@ -3,3 +3,5 @@ build/*
 *.ncu-rep
 .cuda*/
 run.sh
+.venv
+profiles/

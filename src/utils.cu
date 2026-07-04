@@ -120,6 +120,17 @@ namespace utils
       float alpha, float beta,
       int warmup_iters, int bench_iters)
   {
+    cublaslt_fp8_e4m3_bf16_tn_reference(
+        M, N, K, d_A, d_B, d_C, d_C, alpha, beta, warmup_iters, bench_iters);
+  }
+
+  void cublaslt_fp8_e4m3_bf16_tn_reference(
+      int M, int N, int K,
+      const __nv_fp8_e4m3 *d_A, const __nv_fp8_e4m3 *d_B,
+      const __nv_bfloat16 *d_C, __nv_bfloat16 *d_D,
+      float alpha, float beta,
+      int warmup_iters, int bench_iters)
+  {
     cublasLtHandle_t handle;
     CHECK_CUBLASLT(cublasLtCreate(&handle));
 
@@ -127,6 +138,7 @@ namespace utils
     cublasLtMatrixLayout_t a_desc;
     cublasLtMatrixLayout_t b_desc;
     cublasLtMatrixLayout_t c_desc;
+    cublasLtMatrixLayout_t d_desc;
     cublasLtMatmulPreference_t preference;
 
     CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
@@ -144,6 +156,8 @@ namespace utils
         &b_desc, CUDA_R_8F_E4M3, K, N, K));
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
         &c_desc, CUDA_R_16BF, M, N, M));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+        &d_desc, CUDA_R_16BF, M, N, M));
 
     constexpr uint64_t max_workspace_bytes = 32ull * 1024ull * 1024ull;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
@@ -161,7 +175,7 @@ namespace utils
         a_desc,
         b_desc,
         c_desc,
-        c_desc,
+        d_desc,
         preference,
         1,
         &heuristic_result,
@@ -192,8 +206,8 @@ namespace utils
           &beta,
           d_C,
           c_desc,
-          d_C,
-          c_desc,
+          d_D,
+          d_desc,
           &heuristic_result.algo,
           workspace,
           workspace_size,
@@ -241,6 +255,7 @@ namespace utils
       cudaFree(workspace);
     }
     cublasLtMatmulPreferenceDestroy(preference);
+    cublasLtMatrixLayoutDestroy(d_desc);
     cublasLtMatrixLayoutDestroy(c_desc);
     cublasLtMatrixLayoutDestroy(b_desc);
     cublasLtMatrixLayoutDestroy(a_desc);

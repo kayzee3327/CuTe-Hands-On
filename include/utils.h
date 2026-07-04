@@ -23,6 +23,13 @@ namespace utils
       float alpha = 1.0f, float beta = 0.0f,
       int warmup_iters = 1, int bench_iters = 10);
 
+  void cublaslt_fp8_e4m3_bf16_tn_reference(
+      int M, int N, int K,
+      const __nv_fp8_e4m3 *d_A, const __nv_fp8_e4m3 *d_B,
+      const __nv_bfloat16 *d_C, __nv_bfloat16 *d_D,
+      float alpha = 1.0f, float beta = 0.0f,
+      int warmup_iters = 1, int bench_iters = 10);
+
   // Compares a test tensor against a reference tensor and prints the results.
   // Both pointers must reside on the GPU (Device pointers).
   // Note that for HGEMM (using __half), you will typically need to

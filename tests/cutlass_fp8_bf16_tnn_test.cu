@@ -193,7 +193,7 @@ bool run_case(const TestCase &tc)
 
   utils::cublaslt_fp8_e4m3_bf16_tn_reference(
       tc.M, tc.N, tc.K,
-      d_A, d_B, d_C_cublaslt,
+      d_A, d_B, d_C_source, d_C_cublaslt,
       tc.alpha, tc.beta,
       1, 5);
 

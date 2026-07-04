@@ -42,10 +42,10 @@ constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
-using TileShape = cute::Shape<cute::_64, cute::_128, cute::_128>;
-using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
-using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecialized;
-using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized;
+using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
+using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedCooperative;
+using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 using FusionOperation =
     cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementCompute>;
@@ -66,8 +66,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
     ElementB, LayoutB, AlignmentB,
     ElementAccumulator,
     TileShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    cutlass::gemm::collective::StageCount<6>,
     KernelSchedule>::CollectiveOp;
 
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
@@ -80,6 +79,7 @@ using StrideA = typename Gemm::GemmKernel::StrideA;
 using StrideB = typename Gemm::GemmKernel::StrideB;
 using StrideC = typename Gemm::GemmKernel::StrideC;
 using StrideD = typename Gemm::GemmKernel::StrideD;
+using RasterOrderOptions = typename Gemm::GemmKernel::TileScheduler::RasterOrderOptions;
 
 #endif
 
@@ -123,9 +123,7 @@ Fp8TnnGemmResult cutlass_fp8_e4m3_bf16_tnn_gemm(
     return result;
   }
 
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = device_id;
-  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id);
+  auto hw_info = cutlass::KernelHardwareInfo::make_kernel_hardware_info<GemmKernel>(device_id);
 
   typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGemm,
@@ -143,6 +141,8 @@ Fp8TnnGemmResult cutlass_fp8_e4m3_bf16_tnn_gemm(
 
   arguments.epilogue.thread.alpha = alpha;
   arguments.epilogue.thread.beta = beta;
+  arguments.scheduler.max_swizzle_size = 4;
+  arguments.scheduler.raster_order = RasterOrderOptions::AlongN;
 
   Gemm gemm_op;
   cutlass::Status status = Gemm::can_implement(arguments);

@@ -55,6 +55,18 @@ target_include_directories(utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(utils PUBLIC CUDA::cublas CUDA::cublasLt)
 set_target_properties(utils PROPERTIES CUDA_ARCHITECTURES ${CUDA_ARCH_AMPERE})
 
+add_library(cutlass_fp8_gemm STATIC
+  src/cutlass_fp8_gemm.cu
+)
+target_include_directories(cutlass_fp8_gemm PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CUTLASS_INCLUDE_DIRS}
+)
+target_compile_options(cutlass_fp8_gemm PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math>
+)
+set_target_properties(cutlass_fp8_gemm PROPERTIES CUDA_ARCHITECTURES ${CUDA_ARCH_HOPPER})
+
 # --- 3. Helper Function to Add Examples ---
 # This macro saves you from writing 5 lines of cmake for every new file you create
 function(add_cute_example TARGET_NAME SOURCE_FILE)
@@ -143,6 +155,8 @@ add_cute_example(sgemm_opt86 src/sgemm_opt86.cu ${CUDA_ARCH_AMPERE})
 
 if(BUILD_TESTS)
 add_cute_example(cublaslt_fp8_bf16_reference_test tests/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
+add_cute_example(cutlass_fp8_bf16_tnn_test tests/cutlass_fp8_bf16_tnn_test.cu ${CUDA_ARCH_HOPPER})
+target_link_libraries(cutlass_fp8_bf16_tnn_test PRIVATE cutlass_fp8_gemm)
 endif()
 
 if(BUILD_DEMOS)

@@ -107,6 +107,7 @@ cmake -S . -B build \
 && \
 cmake --build build \
     --target cutlass_fp8_bf16_tnn_test \
+    --target fp8_reference_speed_test \
     -j "${SLURM_CPUS_PER_TASK}"
 
 

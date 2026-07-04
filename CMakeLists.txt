@@ -157,6 +157,8 @@ if(BUILD_TESTS)
 add_cute_example(cublaslt_fp8_bf16_reference_test tests/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
 add_cute_example(cutlass_fp8_bf16_tnn_test tests/cutlass_fp8_bf16_tnn_test.cu ${CUDA_ARCH_HOPPER})
 target_link_libraries(cutlass_fp8_bf16_tnn_test PRIVATE cutlass_fp8_gemm)
+add_cute_example(fp8_reference_speed_test tests/fp8_reference_speed_test.cu ${CUDA_ARCH_HOPPER})
+target_link_libraries(fp8_reference_speed_test PRIVATE cutlass_fp8_gemm)
 endif()
 
 if(BUILD_DEMOS)

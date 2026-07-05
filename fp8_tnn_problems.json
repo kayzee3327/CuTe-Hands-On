@@ -14,20 +14,6 @@
     "use_fast_acc": false
   },
   {
-    "m": 4096,
-    "n": 4096,
-    "k": 4096,
-    "batch_count": 1,
-    "layout": "tnn",
-    "dtype_a": "e4m3",
-    "dtype_b": "e4m3",
-    "dtype_c": "bf16",
-    "dtype_acc": "f32",
-    "dtype_d": "bf16",
-    "beta": 1.0,
-    "use_fast_acc": false
-  },
-  {
     "m": 16384,
     "n": 16384,
     "k": 16384,
@@ -42,51 +28,9 @@
     "use_fast_acc": false
   },
   {
-    "m": 16384,
-    "n": 4096,
-    "k": 8192,
-    "batch_count": 1,
-    "layout": "tnn",
-    "dtype_a": "e4m3",
-    "dtype_b": "e4m3",
-    "dtype_c": "bf16",
-    "dtype_acc": "f32",
-    "dtype_d": "bf16",
-    "beta": 1.0,
-    "use_fast_acc": false
-  },
-  {
     "m": 4096,
     "n": 16384,
     "k": 8192,
-    "batch_count": 1,
-    "layout": "tnn",
-    "dtype_a": "e4m3",
-    "dtype_b": "e4m3",
-    "dtype_c": "bf16",
-    "dtype_acc": "f32",
-    "dtype_d": "bf16",
-    "beta": 1.0,
-    "use_fast_acc": false
-  },
-  {
-    "m": 8192,
-    "n": 8192,
-    "k": 4096,
-    "batch_count": 1,
-    "layout": "tnn",
-    "dtype_a": "e4m3",
-    "dtype_b": "e4m3",
-    "dtype_c": "bf16",
-    "dtype_acc": "f32",
-    "dtype_d": "bf16",
-    "beta": 1.0,
-    "use_fast_acc": false
-  },
-  {
-    "m": 8192,
-    "n": 8192,
-    "k": 16384,
     "batch_count": 1,
     "layout": "tnn",
     "dtype_a": "e4m3",

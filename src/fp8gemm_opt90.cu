@@ -181,17 +181,34 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()), SmemLayoutA{});
   Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), SmemLayoutB{});
 
-#if 1
+#if 0
   if (thread0())
   {
     print("mA: "); print(mA); print("\n");
     print("mB: "); print(mB); print("\n");
+    print("gA: "); print(gA); print("\n");
+    print("gB: "); print(gB); print("\n");
     print("sA: "); print(sA); print("\n");
     print("sB: "); print(sB); print("\n");
   }
   
 #endif
 
+  auto [tAgA, tAsA] = tma_partition(tma_atom_a, _0{}, Layout<_1>{},
+                                    group_modes<0,2>(sA), group_modes<0,2>(gA)); // (TMA,k) and (TMA,PIPE)
+  auto [tBgB, tBsB] = tma_partition(tma_atom_b, _0{}, Layout<_1>{},
+                                    group_modes<0,2>(sB), group_modes<0,2>(gB)); // (TMA,k) and (TMA,PIPE)
+
+#if 1
+  if (thread0())
+  {
+    print("tAgA: "); print(tAgA); print("\n");
+    print("tAsA: "); print(tAsA); print("\n");
+    print("tBgB: "); print(tBgB); print("\n");
+    print("tBsB: "); print(tBsB); print("\n");
+  }
+  
+#endif
 }
 
 template<class Policy = SM90_TNN_E4M3_F32_BF16>

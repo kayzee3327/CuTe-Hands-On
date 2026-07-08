@@ -106,8 +106,7 @@ cmake -S . -B build \
     -DBUILD_TESTS=ON \
 && \
 cmake --build build \
-    --target cutlass_fp8_bf16_tnn_test \
-    --target fp8_reference_speed_test \
+    --target fp8gemm_opt90 \
     -j "${SLURM_CPUS_PER_TASK}"
 
 

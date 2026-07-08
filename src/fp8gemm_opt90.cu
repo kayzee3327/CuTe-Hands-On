@@ -179,10 +179,14 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), SmemLayoutB{});
 
 #if 1
-  print("mA: "); print(mA); print("\n");
-  print("mB: "); print(mB); print("\n");
-  print("sA: "); print(sA); print("\n");
-  print("sB: "); print(sB); print("\n");
+  if (thread0())
+  {
+    print("mA: "); print(mA); print("\n");
+    print("mB: "); print(mB); print("\n");
+    print("sA: "); print(sA); print("\n");
+    print("sB: "); print(sB); print("\n");
+  }
+  
 #endif
 
 }

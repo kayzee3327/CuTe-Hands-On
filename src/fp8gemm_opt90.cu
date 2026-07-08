@@ -3,6 +3,9 @@
 // #include <cuda_bf16.h>
 // cutlass provide all types in include/cute/numeric/numeric_types.hpp
 
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+
 #include "cutlass/cluster_launch.hpp"
 
 #include "cutlass/device_kernel.h"
@@ -245,10 +248,42 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
 int main(int argc, char *argv[])
 {
   using Policy = SM90_TNN_E4M3_F32_BF16;
-  Policy::ElementA *dummyA = nullptr;
-  Policy::ElementB *dummyB = nullptr;
-  Policy::ElementC *dummyC = nullptr;
-  launch_gemm<Policy>(dummyA, dummyB, dummyC, 1, 1, 1, 1.0f, 0.0f);
+  using TA = typename Policy::ElementA;
+  using TB = typename Policy::ElementB;
+  using TC = typename Policy::ElementC;
+  // Policy::ElementA *dummyA = nullptr;
+  // Policy::ElementB *dummyB = nullptr;
+  // Policy::ElementC *dummyC = nullptr;
+  // launch_gemm<Policy>(dummyA, dummyB, dummyC, 1, 1, 1, 1.0f, 0.0f);
+  //
+  // Above launch triggers CUDA’s driver enum `201`, which is `CUDA_ERROR_INVALID_CONTEXT`
+  // The immediate cause is that the program enter the Driver API TMA encode path 
+  //  before establishing a current CUDA context. (`cudaFuncSetAttribute` not executed)
+  // TMA descriptor creation validates real CUDA/driver state.
+  // Calling the TMA path as a dummy harness is not valid.
+  // CuTe example does below steps:
+  // - Check device capability
+  // - Allocate VRAM
+  // Thus GPU context must be initialized.
+
+  int m = 8192;
+  int n = 8192;
+  int k = 8192;
+
+  thrust::host_vector<TA> h_A(m*k);
+  thrust::host_vector<TB> h_B(n*k);
+  thrust::host_vector<TC> h_C(m*n);
+
+  for (int j = 0; j < m*k; ++j) h_A[j] = TA(int((rand() % 2) ? 1 : -1));
+  for (int j = 0; j < n*k; ++j) h_B[j] = TB(int((rand() % 2) ? 1 : -1));
+  for (int j = 0; j < m*n; ++j) h_C[j] = TC(0);
+
+  thrust::device_vector<TA> d_A = h_A;
+  thrust::device_vector<TB> d_B = h_B;
+  thrust::device_vector<TC> d_C = h_C;
+
+  launch_gemm<Policy>(d_A.data().get(), d_B.data().get(), d_C.data().get(), m, n, k, 1.0f, 0.0f);
+
   return 0;
 }
 

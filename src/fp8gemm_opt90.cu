@@ -7,6 +7,9 @@
 #include <thrust/device_vector.h>
 
 #include "cutlass/cluster_launch.hpp"
+#include "cutlass/arch/barrier.h"
+#include "cutlass/pipeline/sm90_pipeline.hpp"
+#include "cutlass/numeric_conversion.h"
 
 #include "cutlass/device_kernel.h"
 
@@ -195,11 +198,11 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
 #endif
 
   auto [tAgA, tAsA] = tma_partition(tma_atom_a, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sA), group_modes<0,2>(gA)); // (TMA,k) and (TMA,PIPE)
+                                    group_modes<0,2>(sA), group_modes<0,2>(gA)); // (TMA,k) and (TMA,k_pipe)
   auto [tBgB, tBsB] = tma_partition(tma_atom_b, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sB), group_modes<0,2>(gB)); // (TMA,k) and (TMA,PIPE)
+                                    group_modes<0,2>(sB), group_modes<0,2>(gB)); // (TMA,k) and (TMA,k_pipe)
 
-#if 1
+#if 0
   if (thread0())
   {
     print("tAgA: "); print(tAgA); print("\n");
@@ -209,6 +212,133 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   }
   
 #endif
+
+  constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
+                                      + sizeof(make_tensor_like(tensor<0>(tBsB)));
+
+  auto K_PIPE_MAX = size<1>(tAsA); // static
+  int k_tile_count = size<1>(tAgA); // dynamic
+  int k_tile_next = 0;
+
+  // Initialize Barriers
+  // Choose 1 thread. We only need to initialize the barrier once
+
+  // Get warp idx and sync the warp to prepare for elect instruction 
+  // cutlass::canonical_warp_idx() does not sync
+  int warp_idx = cutlass::canonical_warp_idx_sync();
+  // elect.sync get the chosen lane id and set predicate for the thread
+  // the predicated thread store lane id to return register
+  int lane_predicate = cute::elect_one_sync();
+  uint64_t* producer_mbar = smem.tma_barrier;
+  uint64_t* consumer_mbar = smem.mma_barrier;
+
+  using ProducerBarType = cutlass::arch::ClusterTransactionBarrier;  // TMA
+  using ConsumerBarType = cutlass::arch::ClusterBarrier;             // MMA
+
+  CUTE_UNROLL
+  for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
+  {
+    if ((warp_idx == 0) && lane_predicate) {
+      ProducerBarType::init(&producer_mbar[k_pipe],   1); // 1 thread per TMA
+      ConsumerBarType::init(&consumer_mbar[k_pipe], 128); // 128 thread per wgmma
+    }
+  }
+  cluster_sync();
+
+  // Start async loads for all pipes
+  CUTE_UNROLL
+  for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
+  {
+    if ((warp_idx == 0) && lane_predicate)
+    {
+      ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
+      // check TMA_LOAD_Unpack for execution after `with` 
+      copy(tma_atom_a.with(producer_mbar[k_pipe]), tAgA(_,k_tile_next), tAsA(_,k_pipe));
+      copy(tma_atom_b.with(producer_mbar[k_pipe]), tBgB(_,k_tile_next), tBsB(_,k_pipe));
+    }
+    --k_tile_count;
+    ++k_tile_next;
+  }
+  
+  auto mma = Policy::make_tiled_mma();
+  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+  Tensor tCsA = thr_mma.partition_A(sA);                               // (MMA,MMA_M,MMA_K,PIPE)
+  Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
+  Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
+
+  // Allocate register accumulators and clear them
+  Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
+  clear(tCrC);
+
+  // "r" here does not refer to register fragment
+  // wgmma needs descriptor view to fetch data from SMEM
+  // tCsA/tCsB is just ordinary thread-value view
+  Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
+  Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
+
+#if 1
+  if (thread0())
+  {
+    print("tCrA: "); print(tCrA); print("\n");
+    print("tCsA: "); print(tCsA); print("\n");
+    print("tCrB: "); print(tCrB); print("\n");
+    print("tCsB: "); print(tCsB); print("\n");
+  }
+#endif
+
+  auto write_state = cutlass::PipelineState<K_PIPE_MAX>();             // TMA writes
+  auto read_state  = cutlass::PipelineState<K_PIPE_MAX>();             // MMA  reads
+  CUTE_NO_UNROLL
+  while (k_tile_count > -K_PIPE_MAX)
+  {
+    // Wait for Producer to complete
+    int read_pipe = read_state.index();
+    ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
+
+    // MMAs to cover 1 K_TILE
+    warpgroup_arrive();
+    gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
+    warpgroup_commit_batch();
+
+    // Wait for all MMAs in a K_TILE to complete
+    warpgroup_wait<0>();
+
+    // Notify that consumption is done
+    ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
+    ++read_state;
+
+    // Only issue new TMA copies if there are more tiles to fetch
+    if ((warp_idx == 0) && lane_predicate && (k_tile_count > 0))
+    {
+      int pipe = write_state.index();
+      // Wait for Consumer to complete consumption
+      ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+      // Set expected Tx Bytes after each reset / init
+      ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
+      copy(tma_atom_a.with(producer_mbar[pipe]), tAgA(_,k_tile_next), tAsA(_,pipe));
+      copy(tma_atom_b.with(producer_mbar[pipe]), tBgB(_,k_tile_next), tBsB(_,pipe));
+      ++write_state;
+    }
+    --k_tile_count;
+    ++k_tile_next;
+  }
+
+  //
+  // Epilogue (unpredicated)
+  //
+
+  using ElementCompute = typename Policy::ElementCompute;
+  using ElementC = typename Policy::ElementC;
+  cutlass::NumericConverter<ElementC, ElementCompute> convert_to_c;
+
+  CUTE_UNROLL
+  for (int i = 0; i < size(tCrC); ++i) {
+    ElementCompute result = params.alpha * tCrC(i);
+    if (params.beta != ElementCompute(0)) {
+      result += params.beta * ElementCompute(tCgC(i));
+    }
+    tCgC(i) = convert_to_c(result);
+  }
 }
 
 template<class Policy = SM90_TNN_E4M3_F32_BF16>
@@ -303,4 +433,3 @@ int main(int argc, char *argv[])
 
   return 0;
 }
-

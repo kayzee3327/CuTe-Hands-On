@@ -147,6 +147,7 @@ auto make_gemm_params(typename Policy::Arguments args)
 //  rather than placing it behind a global-memory pointer.
 template <class Policy, class Params>
 __global__
+// v1: tma+wgmma (ss), use explicit producer-consumer synchronization
 void gemm(CUTLASS_GRID_CONSTANT Params const params)
 {
   using namespace cute;

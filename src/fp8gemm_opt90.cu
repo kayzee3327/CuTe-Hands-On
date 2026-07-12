@@ -165,8 +165,13 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int N = params.N;
   int K = params.K;
 
-  auto tma_atom_a = params.tma_atom_a;
-  auto tma_atom_b = params.tma_atom_b;
+  // This is a copy operation. TMA desc is copied from __grid_constant__ to local memory.
+  // st.local is observed in ptx. compute-sanitizer reports illegal instruction at copy().
+  // We must carefully choose between copy and reference.
+  // auto tma_atom_a = params.tma_atom_a;
+  // auto tma_atom_b = params.tma_atom_b;
+  auto const& tma_atom_a = params.tma_atom_a;
+  auto const& tma_atom_b = params.tma_atom_b;
   Tensor mA = tma_atom_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
   Tensor mB = tma_atom_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
   Tensor mC = make_tensor(make_gmem_ptr(params.C), 

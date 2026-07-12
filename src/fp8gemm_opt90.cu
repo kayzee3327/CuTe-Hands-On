@@ -6,12 +6,17 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
+#include <cstdlib>
+#include <iostream>
+
+#include "cutlass_fp8_gemm.h"
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/pipeline/sm90_pipeline.hpp"
 #include "cutlass/numeric_conversion.h"
 
 #include "cutlass/device_kernel.h"
+#include "utils.h"
 
 namespace {
 
@@ -433,8 +438,62 @@ int main(int argc, char *argv[])
   thrust::device_vector<TA> d_A = h_A;
   thrust::device_vector<TB> d_B = h_B;
   thrust::device_vector<TC> d_C = h_C;
+  thrust::device_vector<TC> d_C_source = h_C;
+  thrust::device_vector<TC> d_C_cublaslt = h_C;
+  thrust::device_vector<TC> d_C_cutlass = h_C;
 
-  launch_gemm<Policy>(d_A.data().get(), d_B.data().get(), d_C.data().get(), m, n, k, 1.0f, 0.0f);
+  constexpr float alpha = 1.0f;
+  constexpr float beta = 0.0f;
+
+  cudaError_t status = launch_gemm<Policy>(
+      d_A.data().get(), d_B.data().get(), d_C.data().get(), m, n, k, alpha, beta);
+  if (status != cudaSuccess) {
+    std::cerr << "[fp8gemm_opt90] launch failed: "
+              << cudaGetErrorString(status) << "\n";
+    return EXIT_FAILURE;
+  }
+
+  status = cudaDeviceSynchronize();
+  if (status != cudaSuccess) {
+    std::cerr << "[fp8gemm_opt90] synchronize failed: "
+              << cudaGetErrorString(status) << "\n";
+    return EXIT_FAILURE;
+  }
+
+  auto* d_A_fp8 = reinterpret_cast<__nv_fp8_e4m3*>(d_A.data().get());
+  auto* d_B_fp8 = reinterpret_cast<__nv_fp8_e4m3*>(d_B.data().get());
+  auto* d_C_source_bf16 = reinterpret_cast<__nv_bfloat16*>(d_C_source.data().get());
+  auto* d_C_bf16 = reinterpret_cast<__nv_bfloat16*>(d_C.data().get());
+  auto* d_C_cublaslt_bf16 = reinterpret_cast<__nv_bfloat16*>(d_C_cublaslt.data().get());
+  auto* d_C_cutlass_bf16 = reinterpret_cast<__nv_bfloat16*>(d_C_cutlass.data().get());
+
+  utils::cublaslt_fp8_e4m3_bf16_tn_reference(
+      m, n, k,
+      d_A_fp8, d_B_fp8, d_C_source_bf16, d_C_cublaslt_bf16,
+      alpha, beta,
+      1, 1);
+
+  cutlass_fp8::Fp8TnnGemmResult cutlass_result =
+      cutlass_fp8::cutlass_fp8_e4m3_bf16_tnn_gemm(
+          m, n, k,
+          d_A_fp8, d_B_fp8, d_C_source_bf16, d_C_cutlass_bf16,
+          alpha, beta,
+          1, 1);
+  if (!cutlass_result.ok()) {
+    std::cerr << "[CUTLASS FP8 TNN] failed"
+              << " cutlass_status=" << cutlass_result.cutlass_status
+              << " cuda_error=" << cudaGetErrorString(cutlass_result.cuda_error) << "\n";
+    return EXIT_FAILURE;
+  }
+
+  std::cout << "\n[Compare] fp8gemm_opt90 vs cuBLASLt\n";
+  utils::compare_tensors(d_C_bf16, d_C_cublaslt_bf16, m * n, 0.25f, 0.03f);
+
+  std::cout << "\n[Compare] fp8gemm_opt90 vs CUTLASS FP8 TNN\n";
+  utils::compare_tensors(d_C_bf16, d_C_cutlass_bf16, m * n, 0.25f, 0.03f);
+
+  std::cout << "\n[Compare] CUTLASS FP8 TNN vs cuBLASLt\n";
+  utils::compare_tensors(d_C_cutlass_bf16, d_C_cublaslt_bf16, m * n, 0.25f, 0.03f);
 
   return 0;
 }

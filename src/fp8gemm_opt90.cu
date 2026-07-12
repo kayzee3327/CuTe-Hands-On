@@ -6,7 +6,9 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 
 #include "cutlass_fp8_gemm.h"
@@ -286,7 +288,7 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
 
-#if 1
+#if 0
   if (thread0())
   {
     print("tCrA: "); print(tCrA); print("\n");
@@ -357,7 +359,9 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
                         typename Policy::ElementC      * C,
                         int M, int N, int K,
                         typename Policy::ElementCompute alpha,
-                        typename Policy::ElementCompute beta)
+                        typename Policy::ElementCompute beta,
+                        int warmup_iters = 5,
+                        int bench_iters = 100)
 {
   using namespace cute;
 
@@ -387,14 +391,74 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
                                         smem_size));
   
   cutlass::ClusterLaunchParams cparams = {dimGrid, dimBlock, dimCluster, smem_size};
-  cutlass::Status status = cutlass::launch_kernel_on_cluster(cparams, (const void*) kernel_ptr, params);
-  CUTE_CHECK_LAST();
-  
-  if (status != cutlass::Status::kSuccess)
-  {
-    std::cerr << "Error: Failed at kernel Launch" << std::endl;
-    return cudaErrorLaunchFailure;
+  auto run_kernel = [&]() -> cudaError_t {
+    cutlass::Status status =
+        cutlass::launch_kernel_on_cluster(cparams, (const void*) kernel_ptr, params);
+    if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      return cudaErrorLaunchFailure;
+    }
+    return cudaPeekAtLastError();
+  };
+
+  int timed_iters = std::max(bench_iters, 1);
+
+  // Warm up the kernel before timing so one-time launch and cache effects do not
+  // dominate the measurement.
+  for (int i = 0; i < std::max(warmup_iters, 0); ++i) {
+    cudaError_t status = run_kernel();
+    if (status != cudaSuccess) {
+      return status;
+    }
   }
+  cudaError_t cuda_status = cudaStreamSynchronize(cparams.cuda_stream);
+  if (cuda_status != cudaSuccess) {
+    return cuda_status;
+  }
+
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  cuda_status = cudaEventCreate(&start);
+  if (cuda_status == cudaSuccess) {
+    cuda_status = cudaEventCreate(&stop);
+  }
+  if (cuda_status != cudaSuccess) {
+    if (start != nullptr) {
+      cudaEventDestroy(start);
+    }
+    return cuda_status;
+  }
+
+  cuda_status = cudaEventRecord(start, cparams.cuda_stream);
+  for (int i = 0; i < timed_iters && cuda_status == cudaSuccess; ++i) {
+    cuda_status = run_kernel();
+  }
+  if (cuda_status == cudaSuccess) {
+    cuda_status = cudaEventRecord(stop, cparams.cuda_stream);
+  }
+  if (cuda_status == cudaSuccess) {
+    cuda_status = cudaEventSynchronize(stop);
+  }
+
+  float elapsed_ms = 0.0f;
+  if (cuda_status == cudaSuccess) {
+    cuda_status = cudaEventElapsedTime(&elapsed_ms, start, stop);
+  }
+  cudaEventDestroy(stop);
+  cudaEventDestroy(start);
+  if (cuda_status != cudaSuccess) {
+    return cuda_status;
+  }
+
+  float avg_ms = elapsed_ms / timed_iters;
+  double ops_per_gemm = 2.0 * static_cast<double>(M) * N * K;
+  double tflops = (ops_per_gemm / (avg_ms / 1000.0)) / 1.0e12;
+
+  std::cout << "[CuTe FP8 E4M3->BF16] "
+            << "M=" << M << ", N=" << N << ", K=" << K
+            << " | Time: " << std::fixed << std::setprecision(3) << avg_ms << " ms"
+            << " | Performance: " << std::fixed << std::setprecision(2) << tflops
+            << " TFLOPS\n";
 
   return cudaSuccess;
 }
@@ -444,9 +508,12 @@ int main(int argc, char *argv[])
 
   constexpr float alpha = 1.0f;
   constexpr float beta = 0.0f;
+  constexpr int warmup_iters = 5;
+  constexpr int bench_iters = 100;
 
   cudaError_t status = launch_gemm<Policy>(
-      d_A.data().get(), d_B.data().get(), d_C.data().get(), m, n, k, alpha, beta);
+      d_A.data().get(), d_B.data().get(), d_C.data().get(), m, n, k, alpha, beta,
+      warmup_iters, bench_iters);
   if (status != cudaSuccess) {
     std::cerr << "[fp8gemm_opt90] launch failed: "
               << cudaGetErrorString(status) << "\n";
@@ -471,20 +538,26 @@ int main(int argc, char *argv[])
       m, n, k,
       d_A_fp8, d_B_fp8, d_C_source_bf16, d_C_cublaslt_bf16,
       alpha, beta,
-      1, 1);
+      warmup_iters, bench_iters);
 
   cutlass_fp8::Fp8TnnGemmResult cutlass_result =
       cutlass_fp8::cutlass_fp8_e4m3_bf16_tnn_gemm(
           m, n, k,
           d_A_fp8, d_B_fp8, d_C_source_bf16, d_C_cutlass_bf16,
           alpha, beta,
-          1, 1);
+          warmup_iters, bench_iters);
   if (!cutlass_result.ok()) {
     std::cerr << "[CUTLASS FP8 TNN] failed"
               << " cutlass_status=" << cutlass_result.cutlass_status
               << " cuda_error=" << cudaGetErrorString(cutlass_result.cuda_error) << "\n";
     return EXIT_FAILURE;
   }
+
+  std::cout << "[CUTLASS FP8 E4M3->BF16 TNN] "
+            << "M=" << m << ", N=" << n << ", K=" << k
+            << " | Time: " << std::fixed << std::setprecision(3) << cutlass_result.avg_ms << " ms"
+            << " | Performance: " << std::fixed << std::setprecision(2) << cutlass_result.tflops
+            << " TFLOPS\n";
 
   std::cout << "\n[Compare] fp8gemm_opt90 vs cuBLASLt\n";
   utils::compare_tensors(d_C_bf16, d_C_cublaslt_bf16, m * n, 0.25f, 0.03f);

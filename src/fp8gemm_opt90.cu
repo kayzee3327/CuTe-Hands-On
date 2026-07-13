@@ -159,7 +159,7 @@ auto make_gemm_params(typename Policy::Arguments args)
   
   auto tiles_m = ceil_div(args.M, typename Policy::BM{});
   auto tiles_n = ceil_div(args.N, typename Policy::BN{});
-  auto tile_layout = make_swizzled_tile_layout(tiles_m, tiles_m);
+  auto tile_layout = make_swizzled_tile_layout(tiles_m, tiles_n);
 
   return GemmParams<Policy, decltype(tma_atom_a), decltype(tma_atom_b),
                     decltype(tile_layout)> {

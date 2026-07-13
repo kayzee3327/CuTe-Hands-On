@@ -153,6 +153,10 @@ add_cute_example(sgemm_2 src/examples/sgemm_2.cu ${CUDA_ARCH_AMPERE})
 add_cute_example(sgemm_sm80 src/examples/sgemm_sm80.cu ${CUDA_ARCH_AMPERE})
 add_cute_example(sgemm_opt86 src/sgemm_opt86.cu ${CUDA_ARCH_AMPERE})
 
+add_cute_example(wgmma_tma src/examples/wgmma_tma.cu ${CUDA_ARCH_HOPPER})
+add_cute_example(fp8gemm_opt90 src/fp8gemm_opt90.cu ${CUDA_ARCH_HOPPER})
+target_link_libraries(fp8gemm_opt90 PRIVATE cutlass_fp8_gemm)
+
 if(BUILD_TESTS)
 add_cute_example(cublaslt_fp8_bf16_reference_test tests/cublaslt_fp8_bf16_reference_test.cu ${CUDA_ARCH_HOPPER})
 add_cute_example(cutlass_fp8_bf16_tnn_test tests/cutlass_fp8_bf16_tnn_test.cu ${CUDA_ARCH_HOPPER})

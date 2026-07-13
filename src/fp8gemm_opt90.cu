@@ -138,13 +138,6 @@ auto make_gemm_params(typename Policy::Arguments args)
 }
 
 
-// Annotating a __global__ function parameter with __grid_constant__ 
-//  prevents the compiler from creating a per-thread copy of the parameter. 
-// Instead, all threads in the grid will access the parameter 
-//  through a single address, which can improve performance.
-// For TMA desc, NVIDIA explicitly recommends passing the tensor map 
-//  as a const __grid_constant__ kernel parameter 
-//  rather than placing it behind a global-memory pointer.
 template <class Policy, class Params>
 __global__
 // v1: tma+wgmma (ss), use explicit producer-consumer synchronization
@@ -173,11 +166,6 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int N = params.N;
   int K = params.K;
 
-  // This is a copy operation. TMA desc is copied from __grid_constant__ to local memory.
-  // st.local is observed in ptx. compute-sanitizer reports illegal instruction at copy().
-  // We must carefully choose between copy and reference.
-  // auto tma_atom_a = params.tma_atom_a;
-  // auto tma_atom_b = params.tma_atom_b;
   auto const& tma_atom_a = params.tma_atom_a;
   auto const& tma_atom_b = params.tma_atom_b;
   Tensor mA = tma_atom_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
@@ -234,13 +222,7 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int k_tile_next = 0;
 
   // Initialize Barriers
-  // Choose 1 thread. We only need to initialize the barrier once
-
-  // Get warp idx and sync the warp to prepare for elect instruction 
-  // cutlass::canonical_warp_idx() does not sync
   int warp_idx = cutlass::canonical_warp_idx_sync();
-  // elect.sync get the chosen lane id and set predicate for the thread
-  // the predicated thread store lane id to return register
   int lane_predicate = cute::elect_one_sync();
   uint64_t* producer_mbar = smem.tma_barrier;
   uint64_t* consumer_mbar = smem.mma_barrier;
@@ -279,13 +261,9 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
   Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
 
-  // Allocate register accumulators and clear them
   Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
   clear(tCrC);
 
-  // "r" here does not refer to register fragment
-  // wgmma needs descriptor view to fetch data from SMEM
-  // tCsA/tCsB is just ordinary thread-value view
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
 
@@ -473,20 +451,6 @@ int main(int argc, char *argv[])
   using TA = typename Policy::ElementA;
   using TB = typename Policy::ElementB;
   using TC = typename Policy::ElementC;
-  // Policy::ElementA *dummyA = nullptr;
-  // Policy::ElementB *dummyB = nullptr;
-  // Policy::ElementC *dummyC = nullptr;
-  // launch_gemm<Policy>(dummyA, dummyB, dummyC, 1, 1, 1, 1.0f, 0.0f);
-  //
-  // Above launch triggers CUDA’s driver enum `201`, which is `CUDA_ERROR_INVALID_CONTEXT`
-  // The immediate cause is that the program enter the Driver API TMA encode path 
-  //  before establishing a current CUDA context. (`cudaFuncSetAttribute` not executed)
-  // TMA descriptor creation validates real CUDA/driver state.
-  // Calling the TMA path as a dummy harness is not valid.
-  // CuTe example does below steps:
-  // - Check device capability
-  // - Allocate VRAM
-  // Thus GPU context must be initialized.
 
   int m = 8192;
   int n = 8192;

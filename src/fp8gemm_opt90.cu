@@ -90,7 +90,8 @@ struct SM90_TNN_E4M3_F32_BF16
 
 };
 
-template <class Policy, class TmaAtomA, class TmaAtomB>
+template <class Policy, class TmaAtomA, class TmaAtomB, 
+          class SwizzledTileLayout>
 struct GemmParams
 {
   using ElementA = typename Policy::ElementA;
@@ -106,7 +107,31 @@ struct GemmParams
 
   TmaAtomA tma_atom_a;
   TmaAtomB tma_atom_b;
+
+  SwizzledTileLayout tile_layout;
 };
+
+template<uint32_t G = 4>
+auto make_swizzled_tile_layout(
+  uint32_t tiles_m,
+  uint32_t tiles_n
+) {
+  using namespace cute;
+
+  // Precondition for this initial version:
+  // tiles_m % G == 0 && tiles_n % G == 0
+
+  auto local_layout = make_layout(make_shape(Int<G>{}, Int<G>{}));
+  auto group_layout = make_layout(make_shape(tiles_m / G, tiles_n / G));
+
+   // ((local_m, group_m), (local_n, group_n)) -> linear_bid
+  auto logical_to_bid = blocked_product(local_layout, group_layout);
+
+  // Natural logical linear index -> (logical_m, logical_n)
+  auto logical_coord = make_identity_layout(make_shape(tiles_m, tiles_n));
+
+  return composition(logical_coord, right_inverse(logical_to_bid));
+}
 
 template <class Policy>
 auto make_gemm_params(typename Policy::Arguments args)
@@ -128,14 +153,21 @@ auto make_gemm_params(typename Policy::Arguments args)
   auto tma_atom_b = make_tma_atom(
     SM90_TMA_LOAD{}, mB, sB(_,_,0),
     make_shape(typename Policy::BN{}, typename Policy::BK{}));
+  
+  auto tiles_m = ceil_div(args.M, typename Policy::BM{});
+  auto tiles_n = ceil_div(args.N, typename Policy::BN{});
+  auto tile_layout = make_swizzled_tile_layout(tiles_m, tiles_m);
 
-  return GemmParams<Policy, decltype(tma_atom_a), decltype(tma_atom_b)>{
+  return GemmParams<Policy, decltype(tma_atom_a), decltype(tma_atom_b),
+                    decltype(tile_layout)> {
     args.A, args.B, args.C,
     args.M, args.N, args.K,
     args.alpha, args.beta,
-    tma_atom_a, tma_atom_b
+    tma_atom_a, tma_atom_b,
+    tile_layout
   };
 }
+
 
 
 template <class Policy, class Params>
@@ -173,8 +205,8 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor mC = make_tensor(make_gmem_ptr(params.C), 
                           make_shape(M, N), 
                           make_stride(_1{}, M));          // (M,N)
-  
-  auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
+
+  auto cta_coord = append(params.tile_layout(blockIdx.x + gridDim.x * blockIdx.y),_);
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});
   Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});

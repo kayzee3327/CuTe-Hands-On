@@ -121,16 +121,19 @@ auto make_swizzled_tile_layout(
   // Precondition for this initial version:
   // tiles_m % G == 0 && tiles_n % G == 0
 
-  auto local_layout = make_layout(make_shape(Int<G>{}, Int<G>{}));
-  auto group_layout = make_layout(make_shape(tiles_m / G, tiles_n / G));
-
-   // ((local_m, group_m), (local_n, group_n)) -> linear_bid
-  auto logical_to_bid = blocked_product(local_layout, group_layout);
+  // physical BID digits:
+  //   (local_m, local_n, group_m, group_n)
+  //
+  // output:
+  //   natural logical linear index m + tiles_m * n
+  auto bid_to_logical_linear = make_layout(
+      make_shape(Int<G>{}, Int<G>{}, tiles_m / G, tiles_n / G),
+      make_stride( _1{}, tiles_m, Int<G>{}, tiles_m * G));
 
   // Natural logical linear index -> (logical_m, logical_n)
   auto logical_coord = make_identity_layout(make_shape(tiles_m, tiles_n));
 
-  return composition(logical_coord, right_inverse(logical_to_bid));
+  return composition(logical_coord, bid_to_logical_linear);
 }
 
 template <class Policy>

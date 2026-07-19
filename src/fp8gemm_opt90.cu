@@ -317,14 +317,14 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   }
   
 #endif
-
-  auto cluster_layout = make_layout(Policy::ClusterShape{});
+  using ClusterShape = typename Policy::ClusterShape;
+  auto cluster_layout = make_layout(ClusterShape{});
   uint16_t mc_mask_a = 0;
   uint16_t mc_mask_b = 0;
-  if constexpr (size<0>(cluster_layout) > _1{})
+  if constexpr (get<0>(ClusterShape{}) > _1{})
     for (int m = 0; m < size<0>(cluster_layout); m++)
       mc_mask_b |= uint16_t(1) << cluster_layout(m, cta_id.y, _0{});
-  if constexpr (size<1>(cluster_layout) > _1{})
+  if constexpr (get<1>(ClusterShape{}) > _1{})
     for (int n = 0; n < size<1>(cluster_layout); n++)
       mc_mask_a |= uint16_t(1) << cluster_layout(cta_id.x, n, _0{});
 

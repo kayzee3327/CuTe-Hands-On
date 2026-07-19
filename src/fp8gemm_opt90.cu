@@ -14,7 +14,6 @@
 #include "cutlass_fp8_gemm.h"
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/barrier.h"
-#include "cutlass/pipeline/sm90_pipeline.hpp"
 #include "cutlass/numeric_conversion.h"
 
 #include "cutlass/device_kernel.h"
@@ -50,6 +49,15 @@ struct SM90_TNN_E4M3_F32_BF16
 
   // static constexpr int kThreads = 384; // tiled mma already counts threads
   static constexpr int kStages = 6; // to be ...
+  static constexpr uint32_t kSwizzleGroupM = 4;
+  static constexpr uint32_t kSwizzleGroupN = 4;
+
+  static constexpr uint32_t cx = 2;
+  static constexpr uint32_t cy = 1;
+  static constexpr uint32_t cz = 1;
+  using ClusterShape = cute::Shape<cute::Int<cx>,
+                                   cute::Int<cy>,
+                                   cute::Int<cz>>;
 
   // use factory for composed cute types for direct instantiation
   // aligned well with cute design
@@ -90,7 +98,7 @@ struct SM90_TNN_E4M3_F32_BF16
 
 };
 
-template <class Policy, class TmaAtomA, class TmaAtomB, 
+template <class Policy, class TmaA, class TmaB,
           class SwizzledTileLayout>
 struct GemmParams
 {
@@ -105,30 +113,70 @@ struct GemmParams
   int M, N, K;
   ElementCompute alpha, beta;
 
-  TmaAtomA tma_atom_a;
-  TmaAtomB tma_atom_b;
+  TmaA tma_a;
+  TmaB tma_b;
 
   SwizzledTileLayout tile_layout;
 };
 
-template<uint32_t G = 4>
+template<uint32_t GM, uint32_t GN, class ClusterShape>
 auto make_swizzled_tile_layout(
   uint32_t tiles_m,
-  uint32_t tiles_n
+  uint32_t tiles_n,
+  ClusterShape
 ) {
   using namespace cute;
 
-  // Precondition for this initial version:
-  // tiles_m % G == 0 && tiles_n % G == 0
+  static_assert(rank_v<ClusterShape> == 3,
+                "ClusterShape must have M, N, and K modes");
 
-  // physical BID digits:
-  //   (local_m, local_n, group_m, group_n)
+  constexpr uint32_t CM = size<0>(ClusterShape{});
+  constexpr uint32_t CN = size<1>(ClusterShape{});
+  constexpr uint32_t CK = size<2>(ClusterShape{});
+
+  static_assert(CK == 1, "Grid swizzling only supports ClusterShape K == 1");
+  static_assert(GM > 0 && GN > 0, "Swizzle-group dimensions must be positive");
+  static_assert(GM % CM == 0,
+                "The M swizzle group must contain complete clusters");
+  static_assert(GN % CN == 0,
+                "The N swizzle group must contain complete clusters");
+
+  constexpr uint32_t cluster_group_m = GM / CM;
+  constexpr uint32_t cluster_group_n = GN / CN;
+  uint32_t clusters_m = tiles_m / CM;
+  uint32_t clusters_n = tiles_n / CN;
+
+  // Preconditions for this initial version:
+  // tiles_m % GM == 0 && tiles_n % GN == 0
+
+  // Physical cluster BID digits:
+  //   (local_cluster_m, local_cluster_n, group_m, group_n)
   //
   // output:
-  //   natural logical linear index m + tiles_m * n
-  auto bid_to_logical_linear = make_layout(
-      make_shape(Int<G>{}, Int<G>{}, tiles_m / G, tiles_n / G),
-      make_stride( _1{}, tiles_m, Int<G>{}, tiles_m * G));
+  //   natural logical cluster index cluster_m + clusters_m * cluster_n
+  //
+  // Keep this traversal rank-1 so blocked_product treats each CM x CN CTA
+  // cluster as one indivisible block.
+  //
+  // size(s) == clusters_m * clusters_n
+  // cluster groups as rectangle tiles
+  // This is a explicit result of division or product.
+  auto cluster_bid_to_logical_linear = make_layout(
+      make_tuple(make_shape(Int<cluster_group_m>{},
+                            Int<cluster_group_n>{},
+                            clusters_m / cluster_group_m,
+                            clusters_n / cluster_group_n)),
+      make_tuple(make_stride(_1{},
+                             clusters_m,
+                             Int<cluster_group_m>{},
+                             clusters_m * cluster_group_n)));
+  // inside a cluster
+  auto cta_in_cluster_layout =
+      Layout<Shape<Int<CM>, Int<CN>>>{};
+  // get the grid view
+  auto bid_to_logical_linear =
+      blocked_product(cta_in_cluster_layout,
+                      cluster_bid_to_logical_linear);
 
   // Natural logical linear index -> (logical_m, logical_n)
   auto logical_coord = make_identity_layout(make_shape(tiles_m, tiles_n));
@@ -150,23 +198,36 @@ auto make_gemm_params(typename Policy::Arguments args)
   auto mA = make_tensor(args.A, make_shape(args.M, args.K), dA);
   auto mB = make_tensor(args.B, make_shape(args.N, args.K), dB);
 
-  auto tma_atom_a = make_tma_atom(
-    SM90_TMA_LOAD{}, mA, sA(_,_,0), // SMEM layout
-    make_shape(typename Policy::BM{}, typename Policy::BK{})); // GMEM tiler
-  auto tma_atom_b = make_tma_atom(
-    SM90_TMA_LOAD{}, mB, sB(_,_,0),
-    make_shape(typename Policy::BN{}, typename Policy::BK{}));
-  
+  using ClusterShape = typename Policy::ClusterShape;
+  using TmaOpA = std::conditional_t<
+    (size<1>(ClusterShape{}) > _1{}), 
+    SM90_TMA_LOAD_MULTICAST, 
+    SM90_TMA_LOAD>;
+  using TmaOpB = std::conditional_t<
+    (size<0>(ClusterShape{}) > _1{}),
+    SM90_TMA_LOAD_MULTICAST,
+    SM90_TMA_LOAD>;
+
+  auto tma_a = make_tma_copy_A_sm90(TmaOpA{}, mA, sA(_,_,0),
+                                    Policy::make_cta_tiler(),
+                                    ClusterShape{});
+  auto tma_b = make_tma_copy_B_sm90(TmaOpB{}, mB, sB(_,_,0),
+                                    Policy::make_cta_tiler(),
+                                    ClusterShape{});
+
   auto tiles_m = ceil_div(args.M, typename Policy::BM{});
   auto tiles_n = ceil_div(args.N, typename Policy::BN{});
-  auto tile_layout = make_swizzled_tile_layout(tiles_m, tiles_n);
+  auto tile_layout =
+      make_swizzled_tile_layout<Policy::kSwizzleGroupM,
+                                Policy::kSwizzleGroupN>(
+          tiles_m, tiles_n, typename Policy::ClusterShape{});
 
-  return GemmParams<Policy, decltype(tma_atom_a), decltype(tma_atom_b),
+  return GemmParams<Policy, decltype(tma_a), decltype(tma_b),
                     decltype(tile_layout)> {
     args.A, args.B, args.C,
     args.M, args.N, args.K,
     args.alpha, args.beta,
-    tma_atom_a, tma_atom_b,
+    tma_a, tma_b,
     tile_layout
   };
 }
@@ -201,10 +262,10 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int N = params.N;
   int K = params.K;
 
-  auto const& tma_atom_a = params.tma_atom_a;
-  auto const& tma_atom_b = params.tma_atom_b;
-  Tensor mA = tma_atom_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
-  Tensor mB = tma_atom_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
+  auto const& tma_a = params.tma_a; // TiledCopy
+  auto const& tma_b = params.tma_b; // TiledCopy
+  Tensor mA = tma_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
+  Tensor mB = tma_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
   Tensor mC = make_tensor(make_gmem_ptr(params.C), 
                           make_shape(M, N), 
                           make_stride(_1{}, M));          // (M,N)
@@ -233,14 +294,22 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   
 #endif
 
-  auto [tAgA, tAsA] = tma_partition(tma_atom_a, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sA), group_modes<0,2>(gA)); // (TMA,k) and (TMA,k_pipe)
-  auto [tBgB, tBsB] = tma_partition(tma_atom_b, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sB), group_modes<0,2>(gB)); // (TMA,k) and (TMA,k_pipe)
+  dim3 cta_id = block_id_in_cluster();
+  // CTA with same id y requires same A operand
+  // Along the N-mode, CTA needs same A tile.
+  auto cta_tma_copy_a = tma_a.get_slice(cta_id.y); 
+  auto cta_tma_copy_b = tma_b.get_slice(cta_id.x); 
+  Tensor tAgA = cta_tma_copy_a.partition_S(gA);
+  Tensor tAsA = cta_tma_copy_a.partition_D(sA);
+  Tensor tBgB = cta_tma_copy_b.partition_S(gB);
+  Tensor tBsB = cta_tma_copy_b.partition_D(sB);
 
-#if 0
+#if 1
+  // requires shape check
   if (thread0())
   {
+    print("cta_tma_copy_a = tma_a.get_slice(cta_id.y): "); print(cta_tma_copy_a); print("\n");
+    print("cta_tma_copy_b = tma_b.get_slice(cta_id.x): "); print(cta_tma_copy_b); print("\n");
     print("tAgA: "); print(tAgA); print("\n");
     print("tAsA: "); print(tAsA); print("\n");
     print("tBgB: "); print(tBgB); print("\n");
@@ -249,6 +318,18 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   
 #endif
 
+  auto cluster_layout = make_layout(Policy::ClusterShape{});
+  uint16_t mc_mask_a = 0;
+  uint16_t mc_mask_b = 0;
+  if constexpr (size<0>(cluster_layout) > _1{})
+    for (int m = 0; m < size<0>(cluster_layout); m++)
+      mc_mask_b |= uint16_t(1) << cluster_layout(m, cta_id.y, _0{});
+  if constexpr (size<1>(cluster_layout) > _1{})
+    for (int n = 0; n < size<1>(cluster_layout); n++)
+      mc_mask_a |= uint16_t(1) << cluster_layout(cta_id.x, n, _0{});
+
+#if 0
+  // requires shape check
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                       + sizeof(make_tensor_like(tensor<0>(tBsB)));
 
@@ -273,6 +354,9 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
       ConsumerBarType::init(&consumer_mbar[k_pipe], 128); // 128 thread per wgmma
     }
   }
+  // cutlass::arch::fence_barrier_init();
+  // fence operation is not required here
+  // fence operation is required when barrier.arrive is relaxed
   cluster_sync();
 
   // Start async loads for all pipes
@@ -365,6 +449,7 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     }
     tCgC(i) = convert_to_c(result);
   }
+#endif
 }
 
 template<class Policy = SM90_TNN_E4M3_F32_BF16>
@@ -384,16 +469,28 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
   using Arguments = typename Policy::Arguments;
   using BM = typename Policy::BM;
   using BN = typename Policy::BN;
+
+  int tiles_m = size(ceil_div(M, BM{}));
+  int tiles_n = size(ceil_div(N, BN{}));
+  if ((tiles_m % Policy::kSwizzleGroupM) != 0 ||
+      (tiles_n % Policy::kSwizzleGroupN) != 0) {
+    std::cerr << "Error: fp8gemm_opt90 requires tiles_m divisible by "
+              << Policy::kSwizzleGroupM
+              << " and tiles_n divisible by "
+              << Policy::kSwizzleGroupN
+              << " for the current swizzle." << std::endl;
+    return cudaErrorInvalidValue;
+  }
   
   Arguments args{A, B, C, M, N, K, alpha, beta};
   auto params = make_gemm_params<Policy>(args);
 
   dim3 dimBlock(size(Policy::make_tiled_mma()));
   // test the diff between traditional launch and cluster launch
-  dim3 dimCluster(1,1,1); 
+  dim3 dimCluster(Policy::cx, Policy::cy, Policy::cz);
   // round up to complete each cluster
-  dim3 dimGrid(round_up(size(ceil_div(M, BM{})), dimCluster.x),
-               round_up(size(ceil_div(N, BN{})), dimCluster.y));
+  dim3 dimGrid(round_up(tiles_m, dimCluster.x),
+               round_up(tiles_n, dimCluster.y));
   
   int smem_size = sizeof(SharedStorage<TA, TB, 
                                        decltype(Policy::make_smem_layout_a()),

@@ -334,8 +334,8 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                       + sizeof(make_tensor_like(tensor<0>(tBsB)));
 
-  auto K_PIPE_MAX = size<1>(tAsA); // static
-  int k_tile_count = size<1>(tAgA); // dynamic
+  auto K_PIPE_MAX = size<3>(tAsA); // static
+  int k_tile_count = size<3>(tAgA); // dynamic
   int k_tile_next = 0;
 
   // Initialize Barriers

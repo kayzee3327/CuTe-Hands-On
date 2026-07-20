@@ -15,6 +15,7 @@
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/numeric_conversion.h"
+#include "cutlass/pipeline/sm90_pipeline.hpp"
 
 #include "cutlass/device_kernel.h"
 #include "utils.h"
@@ -262,8 +263,8 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int N = params.N;
   int K = params.K;
 
-  auto const& tma_a = params.tma_a; // TiledCopy
-  auto const& tma_b = params.tma_b; // TiledCopy
+  auto const& tma_a = params.tma_a; // Multicast TiledCopy
+  auto const& tma_b = params.tma_b; // Multicast TiledCopy
   Tensor mA = tma_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
   Tensor mB = tma_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
   Tensor mC = make_tensor(make_gmem_ptr(params.C), 
@@ -299,12 +300,12 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   // Along the N-mode, CTA needs same A tile.
   auto cta_tma_copy_a = tma_a.get_slice(cta_id.y); 
   auto cta_tma_copy_b = tma_b.get_slice(cta_id.x); 
-  Tensor tAgA = cta_tma_copy_a.partition_S(gA);
-  Tensor tAsA = cta_tma_copy_a.partition_D(sA);
-  Tensor tBgB = cta_tma_copy_b.partition_S(gB);
-  Tensor tBsB = cta_tma_copy_b.partition_D(sB);
+  Tensor tAgA = cta_tma_copy_a.partition_S(gA); // (TMA, TMA_M, TMA_K, k)
+  Tensor tAsA = cta_tma_copy_a.partition_D(sA); // (TMA, TMA_M, TMA_K, PIPE)
+  Tensor tBgB = cta_tma_copy_b.partition_S(gB); // (TMA, TMA_N, TMA_K, k)
+  Tensor tBsB = cta_tma_copy_b.partition_D(sB); // (TMA, TMA_N, TMA_K, PIPE)
 
-#if 1
+#if 0
   // requires shape check
   if (thread0())
   {
@@ -319,16 +320,16 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
 #endif
   using ClusterShape = typename Policy::ClusterShape;
   auto cluster_layout = make_layout(ClusterShape{});
-  uint16_t mc_mask_a = 0;
-  uint16_t mc_mask_b = 0;
-  if constexpr (get<0>(ClusterShape{}) > _1{})
-    for (int m = 0; m < size<0>(cluster_layout); m++)
-      mc_mask_b |= uint16_t(1) << cluster_layout(m, cta_id.y, _0{});
-  if constexpr (get<1>(ClusterShape{}) > _1{})
-    for (int n = 0; n < size<1>(cluster_layout); n++)
-      mc_mask_a |= uint16_t(1) << cluster_layout(cta_id.x, n, _0{});
+  [[maybe_unused]] uint16_t mc_mask_a = 0;
+  [[maybe_unused]] uint16_t mc_mask_b = 0;
 
-#if 0
+  for (int m = 0; m < size<0>(cluster_layout); m++)
+    mc_mask_b |= uint16_t(1) << cluster_layout(m, cta_id.y, _0{});
+
+  for (int n = 0; n < size<1>(cluster_layout); n++)
+    mc_mask_a |= uint16_t(1) << cluster_layout(cta_id.x, n, _0{});
+
+#if 1
   // requires shape check
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                       + sizeof(make_tensor_like(tensor<0>(tBsB)));
@@ -350,13 +351,11 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
   {
     if ((warp_idx == 0) && lane_predicate) {
-      ProducerBarType::init(&producer_mbar[k_pipe],   1); // 1 thread per TMA
-      ConsumerBarType::init(&consumer_mbar[k_pipe], 128); // 128 thread per wgmma
+      ProducerBarType::init(&producer_mbar[k_pipe], 1); // 1 per producer
+      ConsumerBarType::init(&consumer_mbar[k_pipe], 2); // multicast-size per consumer
     }
   }
-  // cutlass::arch::fence_barrier_init();
-  // fence operation is not required here
-  // fence operation is required when barrier.arrive is relaxed
+  cutlass::arch::fence_barrier_init();
   cluster_sync();
 
   // Start async loads for all pipes
@@ -367,8 +366,16 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     {
       ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
       // check TMA_LOAD_Unpack for execution after `with` 
-      copy(tma_atom_a.with(producer_mbar[k_pipe]), tAgA(_,k_tile_next), tAsA(_,k_pipe));
-      copy(tma_atom_b.with(producer_mbar[k_pipe]), tBgB(_,k_tile_next), tBsB(_,k_pipe));
+      if constexpr (size<1>(ClusterShape{}) > _1{}) 
+        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      else
+        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{}) 
+        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+      else
+        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+
     }
     --k_tile_count;
     ++k_tile_next;
@@ -406,27 +413,40 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
 
     // MMAs to cover 1 K_TILE
+    warpgroup_fence_operand(tCrC);
     warpgroup_arrive();
     gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
     warpgroup_commit_batch();
 
     // Wait for all MMAs in a K_TILE to complete
     warpgroup_wait<0>();
+    warpgroup_fence_operand(tCrC);
 
-    // Notify that consumption is done
-    ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
-    ++read_state;
+    if ((warp_idx == 0) && lane_predicate)
+    {
+      // Notify that consumption is done
+      ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
+      ++read_state;
+    }
+    
 
     // Only issue new TMA copies if there are more tiles to fetch
     if ((warp_idx == 0) && lane_predicate && (k_tile_count > 0))
     {
-      int pipe = write_state.index();
+      int k_pipe = write_state.index();
       // Wait for Consumer to complete consumption
-      ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+      ConsumerBarType::wait(&consumer_mbar[k_pipe], write_state.phase());
       // Set expected Tx Bytes after each reset / init
-      ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
-      copy(tma_atom_a.with(producer_mbar[pipe]), tAgA(_,k_tile_next), tAsA(_,pipe));
-      copy(tma_atom_b.with(producer_mbar[pipe]), tBgB(_,k_tile_next), tBsB(_,pipe));
+      ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
+      if constexpr (size<1>(ClusterShape{}) > _1{}) 
+        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      else
+        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{}) 
+        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+      else
+        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
       ++write_state;
     }
     --k_tile_count;

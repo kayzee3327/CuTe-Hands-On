@@ -238,6 +238,7 @@ auto make_gemm_params(typename Policy::Arguments args)
 template <class Policy, class Params>
 __global__
 // v1: tma+wgmma (ss), use explicit producer-consumer synchronization
+// v2: excessive DRAM access: grid swizzle + cluster multicast
 void gemm(CUTLASS_GRID_CONSTANT Params const params)
 {
   using namespace cute;

@@ -14,8 +14,8 @@
 #include "cutlass_fp8_gemm.h"
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/barrier.h"
-#include "cutlass/pipeline/sm90_pipeline.hpp"
 #include "cutlass/numeric_conversion.h"
+#include "cutlass/pipeline/sm90_pipeline.hpp"
 
 #include "cutlass/device_kernel.h"
 #include "utils.h"
@@ -50,6 +50,15 @@ struct SM90_TNN_E4M3_F32_BF16
 
   // static constexpr int kThreads = 384; // tiled mma already counts threads
   static constexpr int kStages = 6; // to be ...
+  static constexpr uint32_t kSwizzleGroupM = 4;
+  static constexpr uint32_t kSwizzleGroupN = 4;
+
+  static constexpr uint32_t cx = 2;
+  static constexpr uint32_t cy = 1;
+  static constexpr uint32_t cz = 1;
+  using ClusterShape = cute::Shape<cute::Int<cx>,
+                                   cute::Int<cy>,
+                                   cute::Int<cz>>;
 
   // use factory for composed cute types for direct instantiation
   // aligned well with cute design
@@ -90,7 +99,8 @@ struct SM90_TNN_E4M3_F32_BF16
 
 };
 
-template <class Policy, class TmaAtomA, class TmaAtomB>
+template <class Policy, class TmaA, class TmaB,
+          class SwizzledTileLayout>
 struct GemmParams
 {
   using ElementA = typename Policy::ElementA;
@@ -104,9 +114,76 @@ struct GemmParams
   int M, N, K;
   ElementCompute alpha, beta;
 
-  TmaAtomA tma_atom_a;
-  TmaAtomB tma_atom_b;
+  TmaA tma_a;
+  TmaB tma_b;
+
+  SwizzledTileLayout tile_layout;
 };
+
+template<uint32_t GM, uint32_t GN, class ClusterShape>
+auto make_swizzled_tile_layout(
+  uint32_t tiles_m,
+  uint32_t tiles_n,
+  ClusterShape
+) {
+  using namespace cute;
+
+  static_assert(rank_v<ClusterShape> == 3,
+                "ClusterShape must have M, N, and K modes");
+
+  constexpr uint32_t CM = size<0>(ClusterShape{});
+  constexpr uint32_t CN = size<1>(ClusterShape{});
+  constexpr uint32_t CK = size<2>(ClusterShape{});
+
+  static_assert(CK == 1, "Grid swizzling only supports ClusterShape K == 1");
+  static_assert(GM > 0 && GN > 0, "Swizzle-group dimensions must be positive");
+  static_assert(GM % CM == 0,
+                "The M swizzle group must contain complete clusters");
+  static_assert(GN % CN == 0,
+                "The N swizzle group must contain complete clusters");
+
+  constexpr uint32_t cluster_group_m = GM / CM;
+  constexpr uint32_t cluster_group_n = GN / CN;
+  uint32_t clusters_m = tiles_m / CM;
+  uint32_t clusters_n = tiles_n / CN;
+
+  // Preconditions for this initial version:
+  // tiles_m % GM == 0 && tiles_n % GN == 0
+
+  // Physical cluster BID digits:
+  //   (local_cluster_m, local_cluster_n, group_m, group_n)
+  //
+  // output:
+  //   natural logical cluster index cluster_m + clusters_m * cluster_n
+  //
+  // Keep this traversal rank-1 so blocked_product treats each CM x CN CTA
+  // cluster as one indivisible block.
+  //
+  // size(s) == clusters_m * clusters_n
+  // cluster groups as rectangle tiles
+  // This is a explicit result of division or product.
+  auto cluster_bid_to_logical_linear = make_layout(
+      make_tuple(make_shape(Int<cluster_group_m>{},
+                            Int<cluster_group_n>{},
+                            clusters_m / cluster_group_m,
+                            clusters_n / cluster_group_n)),
+      make_tuple(make_stride(_1{},
+                             clusters_m,
+                             Int<cluster_group_m>{},
+                             clusters_m * cluster_group_n)));
+  // inside a cluster
+  auto cta_in_cluster_layout =
+      Layout<Shape<Int<CM>, Int<CN>>>{};
+  // get the grid view
+  auto bid_to_logical_linear =
+      blocked_product(cta_in_cluster_layout,
+                      cluster_bid_to_logical_linear);
+
+  // Natural logical linear index -> (logical_m, logical_n)
+  auto logical_coord = make_identity_layout(make_shape(tiles_m, tiles_n));
+
+  return composition(logical_coord, bid_to_logical_linear);
+}
 
 template <class Policy>
 auto make_gemm_params(typename Policy::Arguments args)
@@ -122,32 +199,46 @@ auto make_gemm_params(typename Policy::Arguments args)
   auto mA = make_tensor(args.A, make_shape(args.M, args.K), dA);
   auto mB = make_tensor(args.B, make_shape(args.N, args.K), dB);
 
-  auto tma_atom_a = make_tma_atom(
-    SM90_TMA_LOAD{}, mA, sA(_,_,0), // SMEM layout
-    make_shape(typename Policy::BM{}, typename Policy::BK{})); // GMEM tiler
-  auto tma_atom_b = make_tma_atom(
-    SM90_TMA_LOAD{}, mB, sB(_,_,0),
-    make_shape(typename Policy::BN{}, typename Policy::BK{}));
+  using ClusterShape = typename Policy::ClusterShape;
+  using TmaOpA = std::conditional_t<
+    (size<1>(ClusterShape{}) > _1{}), 
+    SM90_TMA_LOAD_MULTICAST, 
+    SM90_TMA_LOAD>;
+  using TmaOpB = std::conditional_t<
+    (size<0>(ClusterShape{}) > _1{}),
+    SM90_TMA_LOAD_MULTICAST,
+    SM90_TMA_LOAD>;
 
-  return GemmParams<Policy, decltype(tma_atom_a), decltype(tma_atom_b)>{
+  auto tma_a = make_tma_copy_A_sm90(TmaOpA{}, mA, sA(_,_,0),
+                                    Policy::make_cta_tiler(),
+                                    ClusterShape{});
+  auto tma_b = make_tma_copy_B_sm90(TmaOpB{}, mB, sB(_,_,0),
+                                    Policy::make_cta_tiler(),
+                                    ClusterShape{});
+
+  auto tiles_m = ceil_div(args.M, typename Policy::BM{});
+  auto tiles_n = ceil_div(args.N, typename Policy::BN{});
+  auto tile_layout =
+      make_swizzled_tile_layout<Policy::kSwizzleGroupM,
+                                Policy::kSwizzleGroupN>(
+          tiles_m, tiles_n, typename Policy::ClusterShape{});
+
+  return GemmParams<Policy, decltype(tma_a), decltype(tma_b),
+                    decltype(tile_layout)> {
     args.A, args.B, args.C,
     args.M, args.N, args.K,
     args.alpha, args.beta,
-    tma_atom_a, tma_atom_b
+    tma_a, tma_b,
+    tile_layout
   };
 }
 
 
-// Annotating a __global__ function parameter with __grid_constant__ 
-//  prevents the compiler from creating a per-thread copy of the parameter. 
-// Instead, all threads in the grid will access the parameter 
-//  through a single address, which can improve performance.
-// For TMA desc, NVIDIA explicitly recommends passing the tensor map 
-//  as a const __grid_constant__ kernel parameter 
-//  rather than placing it behind a global-memory pointer.
+
 template <class Policy, class Params>
 __global__
 // v1: tma+wgmma (ss), use explicit producer-consumer synchronization
+// v2: excessive DRAM access: grid swizzle + cluster multicast
 void gemm(CUTLASS_GRID_CONSTANT Params const params)
 {
   using namespace cute;
@@ -173,20 +264,15 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   int N = params.N;
   int K = params.K;
 
-  // This is a copy operation. TMA desc is copied from __grid_constant__ to local memory.
-  // st.local is observed in ptx. compute-sanitizer reports illegal instruction at copy().
-  // We must carefully choose between copy and reference.
-  // auto tma_atom_a = params.tma_atom_a;
-  // auto tma_atom_b = params.tma_atom_b;
-  auto const& tma_atom_a = params.tma_atom_a;
-  auto const& tma_atom_b = params.tma_atom_b;
-  Tensor mA = tma_atom_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
-  Tensor mB = tma_atom_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
+  auto const& tma_a = params.tma_a; // Multicast TiledCopy
+  auto const& tma_b = params.tma_b; // Multicast TiledCopy
+  Tensor mA = tma_a.get_tma_tensor(make_shape(M,K)); // (M,K) TMA Tensor
+  Tensor mB = tma_b.get_tma_tensor(make_shape(N,K)); // (N,K) TMA Tensor
   Tensor mC = make_tensor(make_gmem_ptr(params.C), 
                           make_shape(M, N), 
                           make_stride(_1{}, M));          // (M,N)
-  
-  auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
+
+  auto cta_coord = append(params.tile_layout(blockIdx.x + gridDim.x * blockIdx.y),_);
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});
   Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});
@@ -210,14 +296,22 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   
 #endif
 
-  auto [tAgA, tAsA] = tma_partition(tma_atom_a, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sA), group_modes<0,2>(gA)); // (TMA,k) and (TMA,k_pipe)
-  auto [tBgB, tBsB] = tma_partition(tma_atom_b, _0{}, Layout<_1>{},
-                                    group_modes<0,2>(sB), group_modes<0,2>(gB)); // (TMA,k) and (TMA,k_pipe)
+  dim3 cta_id = block_id_in_cluster();
+  // CTA with same id y requires same A operand
+  // Along the N-mode, CTA needs same A tile.
+  auto cta_tma_copy_a = tma_a.get_slice(cta_id.y); 
+  auto cta_tma_copy_b = tma_b.get_slice(cta_id.x); 
+  Tensor tAgA = cta_tma_copy_a.partition_S(gA); // (TMA, TMA_M, TMA_K, k)
+  Tensor tAsA = cta_tma_copy_a.partition_D(sA); // (TMA, TMA_M, TMA_K, PIPE)
+  Tensor tBgB = cta_tma_copy_b.partition_S(gB); // (TMA, TMA_N, TMA_K, k)
+  Tensor tBsB = cta_tma_copy_b.partition_D(sB); // (TMA, TMA_N, TMA_K, PIPE)
 
 #if 0
+  // requires shape check
   if (thread0())
   {
+    print("cta_tma_copy_a = tma_a.get_slice(cta_id.y): "); print(cta_tma_copy_a); print("\n");
+    print("cta_tma_copy_b = tma_b.get_slice(cta_id.x): "); print(cta_tma_copy_b); print("\n");
     print("tAgA: "); print(tAgA); print("\n");
     print("tAsA: "); print(tAsA); print("\n");
     print("tBgB: "); print(tBgB); print("\n");
@@ -225,22 +319,28 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   }
   
 #endif
+  using ClusterShape = typename Policy::ClusterShape;
+  auto cluster_layout = make_layout(ClusterShape{});
+  [[maybe_unused]] uint16_t mc_mask_a = 0;
+  [[maybe_unused]] uint16_t mc_mask_b = 0;
 
+  for (int m = 0; m < size<0>(cluster_layout); m++)
+    mc_mask_b |= uint16_t(1) << cluster_layout(m, cta_id.y, _0{});
+
+  for (int n = 0; n < size<1>(cluster_layout); n++)
+    mc_mask_a |= uint16_t(1) << cluster_layout(cta_id.x, n, _0{});
+
+#if 1
+  // requires shape check
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                       + sizeof(make_tensor_like(tensor<0>(tBsB)));
 
-  auto K_PIPE_MAX = size<1>(tAsA); // static
-  int k_tile_count = size<1>(tAgA); // dynamic
+  auto K_PIPE_MAX = size<3>(tAsA); // static
+  int k_tile_count = size<3>(tAgA); // dynamic
   int k_tile_next = 0;
 
   // Initialize Barriers
-  // Choose 1 thread. We only need to initialize the barrier once
-
-  // Get warp idx and sync the warp to prepare for elect instruction 
-  // cutlass::canonical_warp_idx() does not sync
   int warp_idx = cutlass::canonical_warp_idx_sync();
-  // elect.sync get the chosen lane id and set predicate for the thread
-  // the predicated thread store lane id to return register
   int lane_predicate = cute::elect_one_sync();
   uint64_t* producer_mbar = smem.tma_barrier;
   uint64_t* consumer_mbar = smem.mma_barrier;
@@ -252,10 +352,11 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
   {
     if ((warp_idx == 0) && lane_predicate) {
-      ProducerBarType::init(&producer_mbar[k_pipe],   1); // 1 thread per TMA
-      ConsumerBarType::init(&consumer_mbar[k_pipe], 128); // 128 thread per wgmma
+      ProducerBarType::init(&producer_mbar[k_pipe], 1); // 1 per producer
+      ConsumerBarType::init(&consumer_mbar[k_pipe], 2); // multicast-size per consumer
     }
   }
+  cutlass::arch::fence_barrier_init();
   cluster_sync();
 
   // Start async loads for all pipes
@@ -266,8 +367,16 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     {
       ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
       // check TMA_LOAD_Unpack for execution after `with` 
-      copy(tma_atom_a.with(producer_mbar[k_pipe]), tAgA(_,k_tile_next), tAsA(_,k_pipe));
-      copy(tma_atom_b.with(producer_mbar[k_pipe]), tBgB(_,k_tile_next), tBsB(_,k_pipe));
+      if constexpr (size<1>(ClusterShape{}) > _1{}) 
+        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      else
+        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{}) 
+        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+      else
+        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+
     }
     --k_tile_count;
     ++k_tile_next;
@@ -279,13 +388,9 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
   Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
 
-  // Allocate register accumulators and clear them
   Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
   clear(tCrC);
 
-  // "r" here does not refer to register fragment
-  // wgmma needs descriptor view to fetch data from SMEM
-  // tCsA/tCsB is just ordinary thread-value view
   Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
   Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
 
@@ -309,27 +414,57 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
 
     // MMAs to cover 1 K_TILE
+    warpgroup_fence_operand(tCrC);
     warpgroup_arrive();
     gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
     warpgroup_commit_batch();
 
     // Wait for all MMAs in a K_TILE to complete
     warpgroup_wait<0>();
+    warpgroup_fence_operand(tCrC);
 
-    // Notify that consumption is done
-    ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
+    if ((warp_idx == 0) && lane_predicate)
+    {
+      // Notify that consumption is done
+      // requires cluster-wide arrive
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{})
+        CUTE_UNROLL
+        for (int m = 0; m < size<0>(cluster_layout); m++)
+        {
+          uint32_t dst_cta = cluster_layout(m, cta_id.y, _0{});
+          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
+        }
+      
+      if constexpr (size<1>(ClusterShape{}) > _1{})
+        CUTE_UNROLL
+        for (int n = 0; n < size<1>(cluster_layout); n++)
+        {
+          uint32_t dst_cta = cluster_layout(cta_id.x, n, _0{});
+          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
+        }
+      
+    }
     ++read_state;
+    
 
     // Only issue new TMA copies if there are more tiles to fetch
     if ((warp_idx == 0) && lane_predicate && (k_tile_count > 0))
     {
-      int pipe = write_state.index();
+      int k_pipe = write_state.index();
       // Wait for Consumer to complete consumption
-      ConsumerBarType::wait(&consumer_mbar[pipe], write_state.phase());
+      ConsumerBarType::wait(&consumer_mbar[k_pipe], write_state.phase());
       // Set expected Tx Bytes after each reset / init
-      ProducerBarType::arrive_and_expect_tx(&producer_mbar[pipe], tma_transaction_bytes);
-      copy(tma_atom_a.with(producer_mbar[pipe]), tAgA(_,k_tile_next), tAsA(_,pipe));
-      copy(tma_atom_b.with(producer_mbar[pipe]), tBgB(_,k_tile_next), tBsB(_,pipe));
+      ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
+      if constexpr (size<1>(ClusterShape{}) > _1{}) 
+        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      else
+        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{}) 
+        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+      else
+        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
       ++write_state;
     }
     --k_tile_count;
@@ -352,6 +487,7 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     }
     tCgC(i) = convert_to_c(result);
   }
+#endif
 }
 
 template<class Policy = SM90_TNN_E4M3_F32_BF16>
@@ -371,16 +507,28 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
   using Arguments = typename Policy::Arguments;
   using BM = typename Policy::BM;
   using BN = typename Policy::BN;
+
+  int tiles_m = size(ceil_div(M, BM{}));
+  int tiles_n = size(ceil_div(N, BN{}));
+  if ((tiles_m % Policy::kSwizzleGroupM) != 0 ||
+      (tiles_n % Policy::kSwizzleGroupN) != 0) {
+    std::cerr << "Error: fp8gemm_opt90 requires tiles_m divisible by "
+              << Policy::kSwizzleGroupM
+              << " and tiles_n divisible by "
+              << Policy::kSwizzleGroupN
+              << " for the current swizzle." << std::endl;
+    return cudaErrorInvalidValue;
+  }
   
   Arguments args{A, B, C, M, N, K, alpha, beta};
   auto params = make_gemm_params<Policy>(args);
 
   dim3 dimBlock(size(Policy::make_tiled_mma()));
   // test the diff between traditional launch and cluster launch
-  dim3 dimCluster(1,1,1); 
+  dim3 dimCluster(Policy::cx, Policy::cy, Policy::cz);
   // round up to complete each cluster
-  dim3 dimGrid(round_up(size(ceil_div(M, BM{})), dimCluster.x),
-               round_up(size(ceil_div(N, BN{})), dimCluster.y));
+  dim3 dimGrid(round_up(tiles_m, dimCluster.x),
+               round_up(tiles_n, dimCluster.y));
   
   int smem_size = sizeof(SharedStorage<TA, TB, 
                                        decltype(Policy::make_smem_layout_a()),
@@ -473,20 +621,6 @@ int main(int argc, char *argv[])
   using TA = typename Policy::ElementA;
   using TB = typename Policy::ElementB;
   using TC = typename Policy::ElementC;
-  // Policy::ElementA *dummyA = nullptr;
-  // Policy::ElementB *dummyB = nullptr;
-  // Policy::ElementC *dummyC = nullptr;
-  // launch_gemm<Policy>(dummyA, dummyB, dummyC, 1, 1, 1, 1.0f, 0.0f);
-  //
-  // Above launch triggers CUDA’s driver enum `201`, which is `CUDA_ERROR_INVALID_CONTEXT`
-  // The immediate cause is that the program enter the Driver API TMA encode path 
-  //  before establishing a current CUDA context. (`cudaFuncSetAttribute` not executed)
-  // TMA descriptor creation validates real CUDA/driver state.
-  // Calling the TMA path as a dummy harness is not valid.
-  // CuTe example does below steps:
-  // - Check device capability
-  // - Allocate VRAM
-  // Thus GPU context must be initialized.
 
   int m = 8192;
   int n = 8192;

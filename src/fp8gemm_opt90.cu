@@ -425,9 +425,26 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
     if ((warp_idx == 0) && lane_predicate)
     {
       // Notify that consumption is done
-      ConsumerBarType::arrive(&consumer_mbar[read_pipe]);
-      ++read_state;
+      // requires cluster-wide arrive
+      
+      if constexpr (size<0>(ClusterShape{}) > _1{})
+        CUTE_UNROLL
+        for (int m = 0; m < size<0>(cluster_layout); m++)
+        {
+          uint32_t dst_cta = cluster_layout(m, cta_id.y, _0{});
+          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
+        }
+      
+      if constexpr (size<1>(ClusterShape{}) > _1{})
+        CUTE_UNROLL
+        for (int n = 0; n < size<1>(cluster_layout); n++)
+        {
+          uint32_t dst_cta = cluster_layout(cta_id.x, n, _0{});
+          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
+        }
+      
     }
+    ++read_state;
     
 
     // Only issue new TMA copies if there are more tiles to fetch

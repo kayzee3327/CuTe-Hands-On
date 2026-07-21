@@ -48,8 +48,11 @@ struct SM90_TNN_E4M3_F32_BF16
   using BK = cute::_128;
   using CtaTiler = cute::Shape<BM, BN, BK>;
 
-  // static constexpr int kThreads = 384; // tiled mma already counts threads
-  static constexpr int kStages = 6; // to be ...
+  // One warpgroup issues TMA loads and one warpgroup performs WGMMA.
+  static constexpr int kProducerThreads = 128;
+  static constexpr int kConsumerThreads = 128;
+  static constexpr int kThreads = kProducerThreads + kConsumerThreads;
+  static constexpr int kStages = 6;
   static constexpr uint32_t kSwizzleGroupM = 4;
   static constexpr uint32_t kSwizzleGroupN = 4;
 
@@ -236,9 +239,10 @@ auto make_gemm_params(typename Policy::Arguments args)
 
 
 template <class Policy, class Params>
-__global__
+__global__ __launch_bounds__(Policy::kThreads)
 // v1: tma+wgmma (ss), use explicit producer-consumer synchronization
 // v2: excessive DRAM access: grid swizzle + cluster multicast
+// v3: dedicate one warpgroup to TMA and one warpgroup to WGMMA
 void gemm(CUTLASS_GRID_CONSTANT Params const params)
 {
   using namespace cute;
@@ -335,158 +339,163 @@ void gemm(CUTLASS_GRID_CONSTANT Params const params)
   constexpr int tma_transaction_bytes = sizeof(make_tensor_like(tensor<0>(tAsA)))
                                       + sizeof(make_tensor_like(tensor<0>(tBsB)));
 
-  auto K_PIPE_MAX = size<3>(tAsA); // static
-  int k_tile_count = size<3>(tAgA); // dynamic
-  int k_tile_next = 0;
+  constexpr int K_PIPE_MAX = size<3>(tAsA);
+  int k_tile_count = size<3>(tAgA);
 
   // Initialize Barriers
   int warp_idx = cutlass::canonical_warp_idx_sync();
+  int warp_group_idx = cutlass::canonical_warp_group_idx();
+  int warp_group_thread_idx = int(threadIdx.x) % Policy::kConsumerThreads;
   int lane_predicate = cute::elect_one_sync();
   uint64_t* producer_mbar = smem.tma_barrier;
   uint64_t* consumer_mbar = smem.mma_barrier;
 
   using ProducerBarType = cutlass::arch::ClusterTransactionBarrier;  // TMA
   using ConsumerBarType = cutlass::arch::ClusterBarrier;             // MMA
+  constexpr int consumer_arrival_count =
+      size<0>(ClusterShape{}) + size<1>(ClusterShape{}) - 1;
 
   CUTE_UNROLL
   for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
   {
     if ((warp_idx == 0) && lane_predicate) {
-      ProducerBarType::init(&producer_mbar[k_pipe], 1); // 1 per producer
-      ConsumerBarType::init(&consumer_mbar[k_pipe], 2); // multicast-size per consumer
+      ProducerBarType::init(&producer_mbar[k_pipe], 1);
+      // One completion signal is sent to every CTA in this CTA's cluster
+      // row/column union. The local CTA occurs in both sets, so count it once.
+      ConsumerBarType::init(&consumer_mbar[k_pipe], consumer_arrival_count);
     }
   }
   cutlass::arch::fence_barrier_init();
   cluster_sync();
 
-  // Start async loads for all pipes
-  CUTE_UNROLL
-  for (int k_pipe = 0; k_pipe < K_PIPE_MAX; k_pipe++)
-  {
-    if ((warp_idx == 0) && lane_predicate)
-    {
-      ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
-      // check TMA_LOAD_Unpack for execution after `with` 
-      if constexpr (size<1>(ClusterShape{}) > _1{}) 
-        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-      else
-        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-      
-      if constexpr (size<0>(ClusterShape{}) > _1{}) 
-        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-      else
-        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+  if (warp_group_idx == 0) {
+    // The producer warpgroup owns only the TMA pipeline. Starting in the
+    // opposite phase makes the first K_PIPE_MAX acquisitions immediately
+    // available without a separate, potentially out-of-bounds prefill loop.
+    cutlass::PipelineState<K_PIPE_MAX> write_state(0, 1, 0);
 
+    if ((warp_idx == 0) && lane_predicate) {
+      CUTE_NO_UNROLL
+      for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+        int write_pipe = write_state.index();
+        if (k_tile >= K_PIPE_MAX) {
+          ConsumerBarType::wait(&consumer_mbar[write_pipe],
+                                write_state.phase());
+        }
+
+        ProducerBarType::arrive_and_expect_tx(
+            &producer_mbar[write_pipe], tma_transaction_bytes);
+
+        if constexpr (size<1>(ClusterShape{}) > _1{})
+          copy(tma_a.with(producer_mbar[write_pipe], mc_mask_a),
+               tAgA(_,_,_,k_tile), tAsA(_,_,_,write_pipe));
+        else
+          copy(tma_a.with(producer_mbar[write_pipe]),
+               tAgA(_,_,_,k_tile), tAsA(_,_,_,write_pipe));
+
+        if constexpr (size<0>(ClusterShape{}) > _1{})
+          copy(tma_b.with(producer_mbar[write_pipe], mc_mask_b),
+               tBgB(_,_,_,k_tile), tBsB(_,_,_,write_pipe));
+        else
+          copy(tma_b.with(producer_mbar[write_pipe]),
+               tBgB(_,_,_,k_tile), tBsB(_,_,_,write_pipe));
+
+        ++write_state;
+      }
     }
-    --k_tile_count;
-    ++k_tile_next;
   }
-  
-  auto mma = Policy::make_tiled_mma();
-  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
-  Tensor tCsA = thr_mma.partition_A(sA);                               // (MMA,MMA_M,MMA_K,PIPE)
-  Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
-  Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
+  else {
+    // A full warpgroup must execute every WGMMA operation in convergence.
+    auto mma = Policy::make_tiled_mma();
+    static_assert(decltype(size(mma))::value == Policy::kConsumerThreads,
+                  "The consumer warpgroup must match the tiled MMA thread count");
+    ThrMMA thr_mma = mma.get_slice(warp_group_thread_idx);
+    Tensor tCsA = thr_mma.partition_A(sA);                   // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCsB = thr_mma.partition_B(sB);                   // (MMA,MMA_N,MMA_K,PIPE)
+    Tensor tCgC = thr_mma.partition_C(gC);                   // (MMA,MMA_M,MMA_N)
 
-  Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
-  clear(tCrC);
+    Tensor tCrC = thr_mma.make_fragment_C(tCgC);             // (MMA,MMA_M,MMA_N)
+    Tensor tCrA = thr_mma.make_fragment_A(tCsA);             // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCrB = thr_mma.make_fragment_B(tCsB);             // (MMA,MMA_N,MMA_K,PIPE)
+    clear(tCrC);
 
-  Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
-  Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
+    cutlass::PipelineState<K_PIPE_MAX> read_state;
+    cutlass::PipelineState<K_PIPE_MAX> release_state;
+    constexpr int K_PIPE_MMAS = 1;
 
-#if 0
-  if (thread0())
-  {
-    print("tCrA: "); print(tCrA); print("\n");
-    print("tCsA: "); print(tCsA); print("\n");
-    print("tCrB: "); print(tCrB); print("\n");
-    print("tCsB: "); print(tCsB); print("\n");
-  }
-#endif
+    auto release_stage = [&](int release_pipe) {
+      // Signal every CTA in the cluster row/column union exactly once.
+      bool signal = warp_group_thread_idx < consumer_arrival_count;
+      uint32_t dst_cta = 0;
+      if (warp_group_thread_idx < size<0>(ClusterShape{})) {
+        dst_cta = cluster_layout(warp_group_thread_idx, cta_id.y, _0{});
+      }
+      else if (signal) {
+        int n = warp_group_thread_idx - size<0>(ClusterShape{});
+        n += (n >= int(cta_id.y)); // Skip the local CTA already in the M set.
+        dst_cta = cluster_layout(cta_id.x, n, _0{});
+      }
+      ConsumerBarType::arrive(&consumer_mbar[release_pipe], dst_cta, signal);
+    };
 
-  auto write_state = cutlass::PipelineState<K_PIPE_MAX>();             // TMA writes
-  auto read_state  = cutlass::PipelineState<K_PIPE_MAX>();             // MMA  reads
-  CUTE_NO_UNROLL
-  while (k_tile_count > -K_PIPE_MAX)
-  {
-    // Wait for Producer to complete
-    int read_pipe = read_state.index();
-    ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
-
-    // MMAs to cover 1 K_TILE
+    // Keep one committed WGMMA batch in flight. Its stage is released one
+    // iteration later, after warpgroup_wait<1>() proves that batch is done.
+    int prologue_mma_count = k_tile_count > 0 ? K_PIPE_MMAS : 0;
     warpgroup_fence_operand(tCrC);
-    warpgroup_arrive();
-    gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
-    warpgroup_commit_batch();
+    if (prologue_mma_count > 0) {
+      int read_pipe = read_state.index();
+      ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
+      warpgroup_arrive();
+      gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);
+      warpgroup_commit_batch();
+      ++read_state;
+    }
+    warpgroup_fence_operand(tCrC);
 
-    // Wait for all MMAs in a K_TILE to complete
+    CUTE_NO_UNROLL
+    for (int k_tile = prologue_mma_count; k_tile < k_tile_count; ++k_tile) {
+      int read_pipe = read_state.index();
+      ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
+
+      warpgroup_fence_operand(tCrC);
+      warpgroup_arrive();
+      gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);
+      warpgroup_commit_batch();
+
+      // The newest batch may still be running, but the oldest one is complete.
+      warpgroup_wait<K_PIPE_MMAS>();
+      warpgroup_fence_operand(tCrC);
+
+      release_stage(release_state.index());
+      ++read_state;
+      ++release_state;
+    }
+
+    // Drain the one-batch WGMMA prologue and release its final stage.
     warpgroup_wait<0>();
     warpgroup_fence_operand(tCrC);
-
-    if ((warp_idx == 0) && lane_predicate)
-    {
-      // Notify that consumption is done
-      // requires cluster-wide arrive
-      
-      if constexpr (size<0>(ClusterShape{}) > _1{})
-        CUTE_UNROLL
-        for (int m = 0; m < size<0>(cluster_layout); m++)
-        {
-          uint32_t dst_cta = cluster_layout(m, cta_id.y, _0{});
-          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
-        }
-      
-      if constexpr (size<1>(ClusterShape{}) > _1{})
-        CUTE_UNROLL
-        for (int n = 0; n < size<1>(cluster_layout); n++)
-        {
-          uint32_t dst_cta = cluster_layout(cta_id.x, n, _0{});
-          ConsumerBarType::arrive(&consumer_mbar[read_pipe], dst_cta, true);
-        }
-      
+    if (prologue_mma_count > 0) {
+      release_stage(release_state.index());
     }
-    ++read_state;
-    
 
-    // Only issue new TMA copies if there are more tiles to fetch
-    if ((warp_idx == 0) && lane_predicate && (k_tile_count > 0))
-    {
-      int k_pipe = write_state.index();
-      // Wait for Consumer to complete consumption
-      ConsumerBarType::wait(&consumer_mbar[k_pipe], write_state.phase());
-      // Set expected Tx Bytes after each reset / init
-      ProducerBarType::arrive_and_expect_tx(&producer_mbar[k_pipe], tma_transaction_bytes);
-      if constexpr (size<1>(ClusterShape{}) > _1{}) 
-        copy(tma_a.with(producer_mbar[k_pipe], mc_mask_a), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-      else
-        copy(tma_a.with(producer_mbar[k_pipe]), tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-      
-      if constexpr (size<0>(ClusterShape{}) > _1{}) 
-        copy(tma_b.with(producer_mbar[k_pipe], mc_mask_b), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-      else
-        copy(tma_b.with(producer_mbar[k_pipe]), tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-      ++write_state;
+    // Epilogue (unpredicated; the launch checks guarantee full M/N tiles).
+    using ElementCompute = typename Policy::ElementCompute;
+    using ElementC = typename Policy::ElementC;
+    cutlass::NumericConverter<ElementC, ElementCompute> convert_to_c;
+
+    CUTE_UNROLL
+    for (int i = 0; i < size(tCrC); ++i) {
+      ElementCompute result = params.alpha * tCrC(i);
+      if (params.beta != ElementCompute(0)) {
+        result += params.beta * ElementCompute(tCgC(i));
+      }
+      tCgC(i) = convert_to_c(result);
     }
-    --k_tile_count;
-    ++k_tile_next;
   }
 
-  //
-  // Epilogue (unpredicated)
-  //
-
-  using ElementCompute = typename Policy::ElementCompute;
-  using ElementC = typename Policy::ElementC;
-  cutlass::NumericConverter<ElementC, ElementCompute> convert_to_c;
-
-  CUTE_UNROLL
-  for (int i = 0; i < size(tCrC); ++i) {
-    ElementCompute result = params.alpha * tCrC(i);
-    if (params.beta != ElementCompute(0)) {
-      result += params.beta * ElementCompute(tCgC(i));
-    }
-    tCgC(i) = convert_to_c(result);
-  }
+  // Keep producer CTAs alive until all multicast consumers have released their
+  // final stages and completed the epilogue.
+  cluster_sync();
 #endif
 }
 
@@ -523,7 +532,7 @@ cudaError_t launch_gemm(typename Policy::ElementA const* A,
   Arguments args{A, B, C, M, N, K, alpha, beta};
   auto params = make_gemm_params<Policy>(args);
 
-  dim3 dimBlock(size(Policy::make_tiled_mma()));
+  dim3 dimBlock(Policy::kThreads);
   // test the diff between traditional launch and cluster launch
   dim3 dimCluster(Policy::cx, Policy::cy, Policy::cz);
   // round up to complete each cluster

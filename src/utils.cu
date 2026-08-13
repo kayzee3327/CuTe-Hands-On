@@ -159,6 +159,14 @@ namespace utils
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
         &d_desc, CUDA_R_16BF, M, N, M));
 
+    // align with my kernel
+    int8_t fast_accum = 1;
+    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
+        matmul_desc,
+        CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+        &fast_accum,
+        sizeof(fast_accum)));
+
     constexpr uint64_t max_workspace_bytes = 32ull * 1024ull * 1024ull;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
     CHECK_CUBLASLT(cublasLtMatmulPreferenceSetAttribute(
